@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <script>(function(){try{var p=localStorage.getItem('xiyu_theme')||'auto';var d=p==='dark'||(p==='auto'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.setAttribute('data-theme',d?'dark':'light');}catch(e){}})();</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#FFB6D9" />
+  <title>找回密码 · 溪语AI</title>
+  <link rel="icon" href="/logo.png?v=2" />
+  <link rel="apple-touch-icon" href="/logo.png?v=2" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            sakura:'#FFB6D9','sakura-soft':'#FFE8F2','sakura-deep':'#FF8FB8',
+            ink:'#1D1D1F', mute:'#86868B', line:'#F0F0F2', cloud:'#FAFAFA',
+            danger:'#FF4D4F',
+          },
+          fontFamily: { sans: ['-apple-system','BlinkMacSystemFont','"PingFang SC"','"Hiragino Sans GB"','"Microsoft YaHei"','sans-serif'] },
+          boxShadow: {
+            sakura: '0 4px 24px rgba(255, 182, 217, 0.15)',
+            card:   '0 12px 48px rgba(0,0,0,0.06)',
+          },
+          letterSpacing: { tightest: '-0.04em' },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    html { -webkit-font-smoothing: antialiased; }
+    body { background:
+      radial-gradient(ellipse 60% 50% at 50% 0%, rgba(255,182,217,.35), transparent 60%),
+      radial-gradient(ellipse 50% 40% at 90% 100%, rgba(255,232,242,.6), transparent 70%),
+      #FAFAFA;
+    }
+    input:focus { outline: none; box-shadow: 0 0 0 3px rgba(255,182,217,.25); border-color: #FFB6D9 !important; }
+    .btn-primary { background: linear-gradient(135deg, #FFB6D9 0%, #FF8FB8 100%); }
+    .btn-primary:hover:not(:disabled) { box-shadow: 0 16px 48px rgba(255,143,184,.32); transform: translateY(-1px); }
+    .btn-primary:disabled { opacity:.6; cursor: not-allowed; }
+    .spinner { animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .auth-card { backdrop-filter: blur(20px); background: rgba(255,255,255,0.85); }
+  </style>
+  <!-- v1.10.10: Cloudflare Turnstile（找回密码发码同样需要人机验证） -->
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  <script>
+    window.__xiyuTurnstileToken = null;
+    function onTurnstileSuccess(token) {
+      window.__xiyuTurnstileToken = token || null;
+      var hint = document.getElementById('turnstile-hint');
+      if (hint) hint.classList.add('hidden');
+    }
+    function onTurnstileError()   { window.__xiyuTurnstileToken = null; }
+    function onTurnstileExpired() { window.__xiyuTurnstileToken = null; }
+  </script>
+  <script src="/app/theme.js" defer></script>
+</head>
+
+<body class="min-h-screen bg-cloud font-sans text-ink antialiased flex flex-col">
+
+  <!-- Petals -->
+  <div class="fixed inset-0 pointer-events-none overflow-hidden z-0" aria-hidden="true">
+    <svg width="0" height="0" style="position:absolute"><defs>
+      <symbol id="petal-f" viewBox="0 0 100 100"><path d="M50 8 C30 28, 28 58, 50 92 C72 58, 70 28, 50 8 Z" fill="#FFB6D9"/></symbol>
+    </defs></svg>
+    <svg class="petal" style="position:absolute; top:-40px; left:15%; width:18px; animation: petal-fall 16s linear infinite; animation-delay:1s;"><use href="#petal-f"/></svg>
+    <svg class="petal" style="position:absolute; top:-40px; left:42%; width:20px; animation: petal-fall 18s linear infinite; animation-delay:4s;"><use href="#petal-f"/></svg>
+    <svg class="petal" style="position:absolute; top:-40px; left:72%; width:16px; animation: petal-fall 15s linear infinite; animation-delay:7s;"><use href="#petal-f"/></svg>
+  </div>
+  <style>
+    @keyframes petal-fall {
+      0% { transform: translate3d(0,-40px,0) rotate(0deg); opacity:0; }
+      10% { opacity:.4; } 90% { opacity:.4; }
+      100% { transform: translate3d(60px,110vh,0) rotate(420deg); opacity:0; }
+    }
+  </style>
+
+  <header class="relative z-10 px-6 lg:px-10 py-5">
+    <a href="/" class="inline-flex items-center gap-2.5 group">
+      <img src="/logo-256.webp?v=2" alt="溪语AI" class="w-8 h-8 rounded-lg" />
+      <span class="text-[15px] font-semibold tracking-tight">溪语AI</span>
+    </a>
+  </header>
+
+  <main class="relative z-10 flex-1 flex items-center justify-center px-6 py-12">
+    <div class="w-full max-w-[440px]">
+
+      <div class="text-center mb-10">
+        <h1 id="forgot-title" class="text-[32px] font-bold tracking-tightest leading-tight">找回密码</h1>
+        <p id="forgot-subtitle" class="mt-3 text-[15px] text-mute font-medium">通过注册邮箱验证后重置密码。</p>
+      </div>
+
+      <!-- 本地模式：无邮件通道，直接给恢复指引 -->
+      <div id="forgot-local-card" class="hidden auth-card rounded-3xl shadow-card p-8 sm:p-10 border border-white text-center">
+        <div class="w-14 h-14 mx-auto rounded-2xl bg-sakura-soft flex items-center justify-center text-2xl mb-4">🔑</div>
+        <h2 class="text-[18px] font-bold mb-2">本地模式不支持邮件重置</h2>
+        <p class="text-[13px] text-mute font-medium leading-relaxed mb-5">
+          当前是本地自托管模式，没有邮件通道。如果忘记了本地账号密码，可以让服务管理员
+          直接进数据库改 <code class="px-1.5 py-0.5 rounded bg-sakura-soft text-sakura-deep font-mono text-[12px]">user_accounts</code> 表的
+          <code class="px-1.5 py-0.5 rounded bg-sakura-soft text-sakura-deep font-mono text-[12px]">password_hash</code>，
+          或者备份后清空 SQLite 让 Setup Wizard 重新初始化。
+        </p>
+        <a href="/app/auth.html" class="btn-primary inline-block py-3 px-7 text-[14px] font-semibold text-white rounded-full shadow-sakura">返回登录</a>
+      </div>
+
+      <div id="forgot-email-card" class="auth-card rounded-3xl shadow-card p-8 sm:p-10 border border-white">
+
+        <form id="form-forgot" class="space-y-4">
+          <div>
+            <label class="block text-[13px] font-semibold text-ink mb-2">注册邮箱</label>
+            <input name="email" type="email" autocomplete="email" required
+                   placeholder="you@example.com"
+                   class="w-full px-4 py-3 text-[15px] bg-cloud border border-line rounded-2xl font-medium placeholder:text-mute/60 transition-all" />
+          </div>
+
+          <div>
+            <label class="block text-[13px] font-semibold text-ink mb-2">邮箱验证码</label>
+            <div class="flex gap-2 items-stretch">
+              <input name="code" type="text" inputmode="numeric" pattern="\d{6}" maxlength="6" required
+                     placeholder="6 位数字"
+                     class="flex-1 min-w-0 px-4 py-3 text-[15px] bg-cloud border border-line rounded-2xl font-medium placeholder:text-mute/60 tracking-widest transition-all" />
+              <button type="button" id="btn-send-code"
+                      class="shrink-0 px-3 sm:px-4 py-3 text-[13px] font-semibold text-sakura-deep bg-sakura-soft rounded-2xl hover:bg-sakura/30 transition-all whitespace-nowrap">
+                <span class="hidden sm:inline">发送验证码</span>
+                <span class="sm:hidden">发送</span>
+              </button>
+            </div>
+            <!-- v1.10.10: Turnstile 人机验证 -->
+            <div class="cf-turnstile mt-3"
+                 data-sitekey="0x4AAAAAADel_tofOpGBNdg4"
+                 data-theme="light" data-size="flexible"
+                 data-callback="onTurnstileSuccess"
+                 data-error-callback="onTurnstileError"
+                 data-expired-callback="onTurnstileExpired"></div>
+            <p id="turnstile-hint" class="hidden mt-1 text-[12px] text-red-500 font-medium">请先完成人机验证</p>
+          </div>
+
+          <div>
+            <label class="block text-[13px] font-semibold text-ink mb-2">新密码</label>
+            <input name="new_password" type="password" autocomplete="new-password" required minlength="8"
+                   placeholder="至少 8 位"
+                   class="w-full px-4 py-3 text-[15px] bg-cloud border border-line rounded-2xl font-medium placeholder:text-mute/60 transition-all" />
+          </div>
+
+          <div>
+            <label class="block text-[13px] font-semibold text-ink mb-2">确认新密码</label>
+            <input name="confirm_password" type="password" autocomplete="new-password" required minlength="8"
+                   placeholder="再次输入新密码"
+                   class="w-full px-4 py-3 text-[15px] bg-cloud border border-line rounded-2xl font-medium placeholder:text-mute/60 transition-all" />
+          </div>
+
+          <div id="msg" class="hidden text-[13px] font-medium px-3 py-2 rounded-xl"></div>
+
+          <button type="submit" id="btn-submit"
+                  class="btn-primary w-full mt-2 py-3.5 text-[15px] font-semibold text-white rounded-full shadow-sakura transition-all">
+            重置密码
+          </button>
+        </form>
+      </div>
+
+      <p class="text-center text-[13px] text-mute mt-8 font-medium">
+        想起来了？
+        <a href="/app/auth.html" class="text-sakura-deep hover:underline ml-1">返回登录</a>
+      </p>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>
+    lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
+    const API = '';
+    const form = document.getElementById('form-forgot');
+    const btnSendCode = document.getElementById('btn-send-code');
+    const btnSubmit = document.getElementById('btn-submit');
+
+    // 本地模式无邮件通道：直接换成恢复指引卡片
+    (async function detectLocalMode() {
+      try {
+        const r = await fetch('/api/setup/status');
+        const d = await r.json();
+        if (d.ok && d.data?.auth_mode === 'local') {
+          document.getElementById('forgot-email-card').classList.add('hidden');
+          document.getElementById('forgot-local-card').classList.remove('hidden');
+          document.getElementById('forgot-subtitle').textContent = '本地模式无邮箱通道。';
+        }
+      } catch {}
+    })();
+
+    function showMsg(text, kind) {
+      const el = document.getElementById('msg');
+      el.textContent = text;
+      el.className = 'text-[13px] font-medium px-3 py-2 rounded-xl ' +
+        (kind === 'error' ? 'bg-red-50 text-danger' :
+         kind === 'success' ? 'bg-emerald-50 text-emerald-600' :
+         'bg-sakura-soft text-sakura-deep');
+    }
+    // v1.9.3: 与 auth.html 同步 — 永远不抛，网络错被包成 { ok:false, status:0, data:{message:...} }
+    async function apiPost(path, body) {
+      try {
+        const r = await fetch(API + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        return { ok: r.ok, status: r.status, data };
+      } catch (err) {
+        return { ok: false, status: 0, data: { message: '网络异常，请检查网络后重试' }, networkError: true };
+      }
+    }
+    function setLoading(btn, loading, originalText) {
+      btn.disabled = loading;
+      btn.innerHTML = loading
+        ? '<i data-lucide="loader-2" class="inline w-4 h-4 spinner align-[-2px]"></i> 处理中...'
+        : originalText;
+      lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
+    }
+
+    let cooldownTimer = null;
+    btnSendCode.addEventListener('click', async () => {
+      const email = form.email.value.trim();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return showMsg('请先填写正确的邮箱地址', 'error');
+      }
+      // v1.10.10: Turnstile 前置（后端 send-code 配了 secret 后会校验所有发码请求）
+      const tsToken = window.__xiyuTurnstileToken;
+      if (!tsToken) {
+        const hint = document.getElementById('turnstile-hint');
+        if (hint) hint.classList.remove('hidden');
+        return showMsg('请先完成下方人机验证', 'error');
+      }
+
+      btnSendCode.disabled = true;
+      const originalLabel = btnSendCode.innerHTML;
+      btnSendCode.textContent = '发送中...';
+
+      const { ok, data } = await apiPost('/api/auth/send-code', { email, purpose: 'reset_password', turnstile_token: tsToken });
+      if (!ok) {
+        // 失败重置人机验证，下次重试需重验
+        window.__xiyuTurnstileToken = null;
+        try { if (window.turnstile) window.turnstile.reset(); } catch {}
+        showMsg(data.message || '发送失败，请稍后再试', 'error');
+        btnSendCode.disabled = false;
+        btnSendCode.innerHTML = originalLabel;
+        return;
+      }
+      showMsg('验证码已发送至邮箱，5 分钟内有效', 'success');
+
+      let left = 60;
+      btnSendCode.textContent = left + ' s';
+      cooldownTimer = setInterval(() => {
+        left--;
+        if (left <= 0) {
+          clearInterval(cooldownTimer);
+          btnSendCode.disabled = false;
+          btnSendCode.innerHTML = originalLabel;
+        } else {
+          btnSendCode.textContent = left + ' s';
+        }
+      }, 1000);
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const newPassword = form.new_password.value;
+      const confirmPassword = form.confirm_password.value;
+      if (newPassword !== confirmPassword) {
+        return showMsg('两次输入的密码不一致', 'error');
+      }
+      if (newPassword.length < 8) {
+        return showMsg('密码至少 8 位', 'error');
+      }
+      const originalText = btnSubmit.innerHTML;
+      setLoading(btnSubmit, true, '重置密码');
+
+      const { ok, data } = await apiPost('/api/auth/reset-password', {
+        email: form.email.value.trim(),
+        code: form.code.value.trim(),
+        new_password: newPassword,
+      });
+      setLoading(btnSubmit, false, originalText);
+
+      if (!ok) {
+        return showMsg(data.message || '重置失败', 'error');
+      }
+      showMsg('密码已重置，3 秒后跳转登录...', 'success');
+      setTimeout(() => { location.href = '/app/auth.html'; }, 3000);
+    });
+  </script>
+</body>
+</html>

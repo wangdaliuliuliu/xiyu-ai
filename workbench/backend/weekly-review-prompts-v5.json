@@ -1,0 +1,16 @@
+{
+  "version": "weekly-review-v5",
+  "stages": {
+    "signal_investigation": {"id": "weekly-review.signal-investigation.v5", "role": "识别达到重要性阈值的问题或机会，并为缺少因果证据的信号提出一个具体问题。程序计算的数据不可修改。", "output": ["investigations"]},
+    "answer_evidence_review": {"id": "weekly-review.answer-evidence-review.v5", "role": "审查运营回答是否与信号相关、是否说明影响环节并提供可核证据。无关或不足时只追问一个关键问题。不得因时间相近认定因果。", "output": ["status", "assessment", "followUpQuestion", "conclusion", "evidenceRefs"]},
+    "review_synthesis": {"id": "weekly-review.review-synthesis.v5", "role": "结合数据事实、历史趋势、本周经营事实和卡片对话，逐条形成因果严谨的复盘结论。不能闭合的因果必须标为待观察，不输出下一步动作。", "output": ["reviewConclusions"]},
+    "experience_candidates": {"id": "weekly-review.experience-candidates.v5", "role": "只从复盘结论和实际执行动作中提炼零到多条候选经验，包含背景、动作、结果和适用边界。证据不足时返回空数组。", "output": ["experienceCandidates"]},
+    "next_action_candidates": {"id": "weekly-review.next-action-candidates.v5", "role": "基于复盘结论生成少量可执行、可验证的下一步动作候选。不得把待确认原因写成既定事实。", "output": ["actionCandidates"]}
+  },
+  "rules": [
+    "问题和回答保留在对应复盘卡片中，不显示轮次。",
+    "生成复盘分析前不得生成经验和下一步动作。",
+    "最终周报只包含结论、运营确认保留的经验和动作，不包含调查问题。",
+    "所有模型阶段使用独立提示词 ID 和 JSON 输出契约。"
+  ]
+}

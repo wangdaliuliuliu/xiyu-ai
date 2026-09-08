@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "xiyu-enterprise-access-v1",
+  "defaultDeny": true,
+  "actors": {
+    "replace-with-xiyu-account-id": {
+      "projectIds": ["yuanqu-vr"],
+      "venueIds": ["DONGBA", "ZHONGYING"]
+    }
+  }
+}

@@ -1,0 +1,513 @@
+/* ============================================================================
+ * 溪语 AI · Liquid Glass 主题层 (v1.6.1)
+ *
+ * 一个纯视觉的"苹果液态玻璃"增强层：升级背景光晕、把卡片 / 导航 / 按钮 /
+ * 输入框统一玻璃化、加丝滑微动效。只需在 <head> 引入这一个文件即可，
+ * 不依赖任何 HTML 结构或 JS 改动。
+ *
+ * v1.6.1 改进：
+ *   - 多层背景光晕（樱粉 + 雾紫 + 暖白）+ 噪声纹理，质感更近真玻璃
+ *   - 主按钮高光、悬浮态更细腻；按下回弹更克制
+ *   - 输入框 focus ring 用 3 色渐变，去掉廉价的单色光晕
+ *   - 卡片悬浮态：浮起 1.5px + 高光描边渐显（之前是 2px，太跳）
+ *   - .hero-blob / .floating-card / .chip / .pill 等可选工具类
+ *   - prefers-color-scheme: dark 骨架（非默认开启，避免破坏现有页面）
+ *
+ * 设计原则：
+ *   - 半透明 + backdrop-blur + 高光描边 + 柔和多层投影 = 玻璃质感
+ *   - 背景漂浮的彩色光斑透过玻璃，才有"液态"通透感
+ *   - 所有交互走统一的丝滑缓动
+ *   - 覆盖 Tailwind utility 时才用 !important，尽量克制
+ *
+ * Copyright (c) 2026 溪语 AI Contributors. MIT License.
+ * ========================================================================== */
+
+:root {
+  /* ─ 玻璃基色 ─ */
+  --glass-bg:        rgba(255, 255, 255, 0.58);
+  --glass-bg-strong: rgba(255, 255, 255, 0.78);
+  --glass-bg-soft:   rgba(255, 255, 255, 0.42);
+  --glass-border:    rgba(255, 255, 255, 0.7);
+  --glass-border-soft: rgba(255, 255, 255, 0.45);
+  --glass-blur:      24px;
+  --glass-blur-strong: 36px;
+
+  /* ─ 阴影 ─ 多层叠加才有"飘起来"的感觉 */
+  --glass-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 -1px 0 rgba(255, 192, 215, 0.18) inset,
+    0 10px 30px -8px rgba(31, 38, 135, 0.10),
+    0 4px 10px -4px rgba(255, 143, 184, 0.10);
+  --glass-shadow-hover:
+    0 1px 0 rgba(255, 255, 255, 0.95) inset,
+    0 -1px 0 rgba(255, 192, 215, 0.22) inset,
+    0 22px 56px -10px rgba(31, 38, 135, 0.18),
+    0 8px 18px -8px rgba(255, 143, 184, 0.20);
+  --glass-shadow-press:
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 4px 14px -4px rgba(255, 143, 184, 0.16);
+
+  /* ─ 缓动 ─ */
+  --ease-silk:  cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ─ 主色 ─ 樱粉系 + 中性 */
+  --sakura:       #FFB6D9;
+  --sakura-deep:  #FF8FB8;
+  --sakura-soft:  #FFE8F2;
+  --mist-violet:  #C9B8FF;
+  --mist-blue:    #B2C9FF;
+  --ink:          #1D1D1F;
+  --ink-mute:     #6C6C72;
+
+  /* ─ ring (focus 用渐变) ─ */
+  --ring-grad: linear-gradient(135deg, #FFB6D9 0%, #C9B8FF 50%, #B2C9FF 100%);
+}
+
+/* ============================================================================
+ * 背景层：3 层光晕 + 极淡噪点，给整页一个"奶油玻璃"底
+ * ========================================================================== */
+body {
+  position: relative;
+  background-color: #FAF7FB;
+  /* 极淡的纸纹噪声，让纯色背景不死板 */
+  background-image:
+    radial-gradient(rgba(31, 38, 135, 0.012) 1px, transparent 1px),
+    radial-gradient(rgba(255, 143, 184, 0.012) 1px, transparent 1px);
+  background-size: 4px 4px, 8px 8px;
+  background-position: 0 0, 2px 2px;
+}
+
+body::before,
+body::after,
+body > .glass-aurora {
+  content: "";
+  position: fixed;
+  z-index: -2;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+body::before {
+  /* 樱粉 — 左上 */
+  width: 56vw; height: 56vw;
+  max-width: 760px; max-height: 760px;
+  top: -16vw; left: -12vw;
+  opacity: 0.6;
+  background: radial-gradient(circle at 30% 30%, rgba(255, 182, 217, 0.95), rgba(255, 182, 217, 0) 70%);
+  animation: glass-drift-a 28s var(--ease-silk) infinite alternate;
+}
+body::after {
+  /* 雾蓝紫 — 右下 */
+  width: 48vw; height: 48vw;
+  max-width: 660px; max-height: 660px;
+  bottom: -18vw; right: -14vw;
+  opacity: 0.55;
+  background: radial-gradient(circle at 60% 60%, rgba(178, 201, 255, 0.85), rgba(201, 184, 255, 0.6) 40%, rgba(178, 201, 255, 0) 75%);
+  animation: glass-drift-b 34s var(--ease-silk) infinite alternate;
+}
+
+/* 可选第三层光晕：页面里加 <div class="glass-aurora"></div> 就显出 */
+body > .glass-aurora {
+  width: 40vw; height: 40vw;
+  max-width: 520px; max-height: 520px;
+  top: 30vh; left: 50vw;
+  transform: translateX(-50%);
+  opacity: 0.35;
+  background: radial-gradient(circle, rgba(255, 232, 242, 0.9), rgba(255, 232, 242, 0) 70%);
+  animation: glass-drift-c 24s var(--ease-silk) infinite alternate;
+}
+
+@keyframes glass-drift-a {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(6vw, 8vh, 0) scale(1.15); }
+}
+@keyframes glass-drift-b {
+  0%   { transform: translate3d(0, 0, 0) scale(1.05); }
+  100% { transform: translate3d(-5vw, -6vh, 0) scale(1); }
+}
+@keyframes glass-drift-c {
+  0%   { transform: translate(-50%, 0) scale(0.95); }
+  100% { transform: translate(-50%, -6vh) scale(1.1); }
+}
+
+/* ============================================================================
+ * 玻璃卡片
+ *   - 命中现有的 shadow-sakura / shadow-card 容器 + .glass 工具类
+ *   - 排除已有彩色背景（按钮/标签/头像方框等）的元素，避免吃掉它们的颜色
+ * ========================================================================== */
+.shadow-sakura:not([class*="bg-gradient"]):not([class*="bg-sakura"]):not(.bg-pink-500):not(.btn-primary),
+.shadow-card:not([class*="bg-gradient"]):not([class*="bg-sakura"]):not(.bg-pink-500):not(.btn-primary),
+.glass {
+  background: var(--glass-bg) !important;
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: var(--glass-shadow) !important;
+  transition:
+    box-shadow 0.5s var(--ease-silk),
+    transform 0.5s var(--ease-silk),
+    border-color 0.5s var(--ease-silk);
+}
+.glass-strong { background: var(--glass-bg-strong) !important; backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%); -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%); }
+.glass-soft   { background: var(--glass-bg-soft) !important; }
+
+/* hover 浮起：1.5px 微浮 + 描边渐亮 */
+a.shadow-sakura:not([class*="bg-gradient"]):not([class*="bg-sakura"]):not(.btn-primary):hover,
+a.shadow-card:not([class*="bg-gradient"]):not([class*="bg-sakura"]):not(.btn-primary):hover,
+button.shadow-sakura:not([class*="bg-gradient"]):not([class*="bg-sakura"]):not(.btn-primary):hover,
+.glass-hover:hover {
+  box-shadow: var(--glass-shadow-hover) !important;
+  border-color: rgba(255, 215, 232, 0.9) !important;
+  transform: translateY(-1.5px);
+}
+
+/* ============================================================================
+ * 玻璃导航栏（自动命中 header.sticky / nav.sticky / .glass-nav / .fixed top-0）
+ * ========================================================================== */
+header.sticky,
+nav.sticky,
+nav.fixed.top-0,
+.glass-nav {
+  background: rgba(255, 255, 255, 0.62) !important;
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.55) !important;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.6) inset,
+    0 4px 24px rgba(31, 38, 135, 0.06);
+}
+
+/* ============================================================================
+ * 玻璃输入 / 文本域 / 选择框
+ * focus ring 用三色渐变描边，比单色光晕高级
+ * ========================================================================== */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+textarea,
+select {
+  background: rgba(255, 255, 255, 0.6) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition:
+    box-shadow 0.35s var(--ease-silk),
+    border-color 0.35s var(--ease-silk),
+    background 0.35s var(--ease-silk);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):focus,
+textarea:focus,
+select:focus {
+  background: rgba(255, 255, 255, 0.82) !important;
+  box-shadow:
+    0 0 0 1px rgba(255, 143, 184, 0.45),
+    0 0 0 5px rgba(255, 143, 184, 0.16),
+    0 8px 20px -10px rgba(255, 143, 184, 0.30);
+  outline: none !important;
+}
+
+/* ============================================================================
+ * 玻璃按钮
+ * ========================================================================== */
+button, a, .btn {
+  transition:
+    transform 0.35s var(--ease-silk),
+    box-shadow 0.35s var(--ease-silk),
+    filter 0.35s var(--ease-silk),
+    background 0.35s var(--ease-silk);
+}
+
+.bg-sakura,
+.bg-sakura-deep,
+button.bg-sakura,
+.btn-primary,
+[class*="from-sakura"][class*="to-sakura"] {
+  background-image: linear-gradient(135deg, #FFC2E0 0%, #FFA0C7 45%, #FF8FB8 100%) !important;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.6) inset,
+    0 -1px 0 rgba(180, 100, 140, 0.18) inset,
+    0 10px 24px -8px rgba(255, 143, 184, 0.50) !important;
+}
+.bg-sakura:hover,
+.bg-sakura-deep:hover,
+button.bg-sakura:hover,
+.btn-primary:hover,
+[class*="from-sakura"][class*="to-sakura"]:hover {
+  transform: translateY(-1.5px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.7) inset,
+    0 -1px 0 rgba(180, 100, 140, 0.20) inset,
+    0 18px 38px -10px rgba(255, 143, 184, 0.60) !important;
+  filter: saturate(1.06) brightness(1.02);
+}
+.bg-sakura:active,
+button.bg-sakura:active,
+.btn-primary:active,
+[class*="from-sakura"][class*="to-sakura"]:active {
+  transform: translateY(0) scale(0.985);
+  box-shadow: var(--glass-shadow-press) !important;
+}
+
+/* ============================================================================
+ * 玻璃滚动条
+ * ========================================================================== */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(255, 143, 184, 0.35), rgba(201, 184, 255, 0.35));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(255, 143, 184, 0.6), rgba(201, 184, 255, 0.55));
+  background-clip: content-box;
+}
+
+/* ============================================================================
+ * 可选工具类（hero 区 / featured / chips 等场景）
+ * 都是新增的：现有页面不会改变，要用时主动加 class
+ * ========================================================================== */
+
+/* hero 区背后大色块光晕（任意 element 加 .hero-blob 都行） */
+.hero-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: -1;
+}
+.hero-blob.is-pink   { background: radial-gradient(circle, rgba(255, 182, 217, 0.85), rgba(255, 182, 217, 0) 70%); }
+.hero-blob.is-violet { background: radial-gradient(circle, rgba(201, 184, 255, 0.75), rgba(201, 184, 255, 0) 70%); }
+.hero-blob.is-blue   { background: radial-gradient(circle, rgba(178, 201, 255, 0.75), rgba(178, 201, 255, 0) 70%); }
+.hero-blob.is-cream  { background: radial-gradient(circle, rgba(255, 232, 242, 0.95), rgba(255, 232, 242, 0) 70%); }
+
+/* "悬浮卡片"：插图周围常用 */
+.floating-card {
+  position: relative;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 22px;
+  box-shadow: var(--glass-shadow);
+  animation: floating-card 6s var(--ease-silk) infinite alternate;
+}
+@keyframes floating-card {
+  0%   { transform: translateY(0); }
+  100% { transform: translateY(-6px); }
+}
+
+/* glass-chip：小标签，比 px-3 py-1 更稳定。
+   注意：不叫 .chip，因为 create.html 已经有同名 class 作为性格选择标签 */
+.glass-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  font-size: 12px; font-weight: 600;
+  color: var(--sakura-deep);
+  background: rgba(255, 232, 242, 0.7);
+  border: 1px solid rgba(255, 192, 215, 0.5);
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* pill：标签胶囊，多色 */
+.pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px;
+  font-size: 11px; font-weight: 600;
+  color: var(--ink-mute);
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  border-radius: 999px;
+  backdrop-filter: blur(6px);
+}
+
+/* "ghost link"：主导航/底部链接用得到 */
+.glass-link {
+  color: var(--ink-mute);
+  transition: color 0.3s var(--ease-silk);
+}
+.glass-link:hover { color: var(--sakura-deep); }
+
+/* ============================================================================
+ * 进场动画：让首屏更"丝滑"地浮现
+ * ========================================================================== */
+@keyframes glass-fade-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+main > *, section, .glass, .shadow-sakura, .shadow-card {
+  animation: glass-fade-in 0.7s var(--ease-silk) both;
+}
+
+/* 顺序错峰（任意元素加 .glass-stagger 让其子级依次浮现） */
+.glass-stagger > *:nth-child(1) { animation-delay: 0.00s; }
+.glass-stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.glass-stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.glass-stagger > *:nth-child(4) { animation-delay: 0.18s; }
+.glass-stagger > *:nth-child(5) { animation-delay: 0.24s; }
+.glass-stagger > *:nth-child(6) { animation-delay: 0.30s; }
+.glass-stagger > *:nth-child(7) { animation-delay: 0.36s; }
+.glass-stagger > *:nth-child(8) { animation-delay: 0.42s; }
+
+/* ============================================================================
+ * 无障碍：尊重 prefers-reduced-motion
+ * ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after, body > .glass-aurora,
+  main > *, section, .glass, .shadow-sakura, .shadow-card,
+  .floating-card {
+    animation: none !important;
+  }
+  *, *::before, *::after { transition-duration: 0.01ms !important; }
+}
+
+/* ============================================================================
+ * 暗色模式骨架（默认不启用 — 页面 <html data-theme="dark"> 才生效）
+ * 大部分页面声明了 color-scheme: light only，所以这套规则只对显式 opt-in 的页面生效
+ * ========================================================================== */
+html[data-theme="dark"] {
+  --glass-bg:        rgba(28, 28, 32, 0.55);
+  --glass-bg-strong: rgba(28, 28, 32, 0.75);
+  --glass-bg-soft:   rgba(28, 28, 32, 0.40);
+  --glass-border:    rgba(255, 255, 255, 0.10);
+  --glass-border-soft: rgba(255, 255, 255, 0.06);
+  --glass-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 10px 30px -8px rgba(0, 0, 0, 0.5),
+    0 4px 10px -4px rgba(255, 143, 184, 0.10);
+  --ink:      #F4F4F6;
+  --ink-mute: #A0A0A8;
+}
+html[data-theme="dark"] body {
+  background-color: #0F0F12;
+}
+html[data-theme="dark"] body::before  { opacity: 0.35; }
+html[data-theme="dark"] body::after   { opacity: 0.30; }
+
+/* ============================================================================
+ * v1.10.0 dark mode 覆盖 — Tailwind utilities + 表单元素 + 卡片细节
+ * 系统跟随 + 手动切换共用（auto 模式由 /app/theme.js 写 data-theme="dark"）
+ * ========================================================================== */
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+html[data-theme="dark"] body {
+  color: #F4F4F6;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 0%, rgba(255,143,184,.18), transparent 60%),
+    radial-gradient(ellipse 50% 40% at 90% 100%, rgba(143,164,255,.12), transparent 70%),
+    #0F0F12 !important;
+}
+html[data-theme="dark"] .bg-cloud     { background-color: #0F0F12 !important; }
+html[data-theme="dark"] .bg-white     { background-color: #1A1A1F !important; }
+html[data-theme="dark"] .bg-gray-50,
+html[data-theme="dark"] .bg-neutral-50 { background-color: #16161B !important; }
+html[data-theme="dark"] .text-ink     { color: #F4F4F6 !important; }
+html[data-theme="dark"] .text-mute    { color: #A0A0A8 !important; }
+html[data-theme="dark"] .text-gray-500,
+html[data-theme="dark"] .text-gray-600 { color: #A0A0A8 !important; }
+html[data-theme="dark"] .text-gray-700,
+html[data-theme="dark"] .text-gray-800,
+html[data-theme="dark"] .text-gray-900 { color: #E8E8EC !important; }
+html[data-theme="dark"] .border-line  { border-color: #2A2A30 !important; }
+html[data-theme="dark"] .border-gray-100,
+html[data-theme="dark"] .border-gray-200 { border-color: #2A2A30 !important; }
+html[data-theme="dark"] .bg-sakura-soft\/30,
+html[data-theme="dark"] .bg-sakura-soft\/40,
+html[data-theme="dark"] .bg-sakura-soft\/60,
+html[data-theme="dark"] .bg-sakura-soft\/70 { background-color: rgba(255, 143, 184, 0.10) !important; }
+html[data-theme="dark"] .bg-sakura-soft     { background-color: rgba(255, 143, 184, 0.12) !important; }
+html[data-theme="dark"] .bg-emerald-50      { background-color: rgba(16, 185, 129, 0.12) !important; }
+html[data-theme="dark"] .bg-indigo-50       { background-color: rgba(99, 102, 241, 0.12) !important; }
+/* 表单元素 */
+html[data-theme="dark"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] select {
+  background-color: #16161B !important;
+  border-color: #2A2A30 !important;
+  color: #F4F4F6 !important;
+}
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder { color: #6C6C72 !important; }
+html[data-theme="dark"] .placeholder\:text-mute\/60::placeholder { color: rgba(160,160,168,0.6) !important; }
+/* 卡片细节 — card 默认背景白；玻璃 class 自动跟变量走，但 .card（非 .glass）需手动 */
+html[data-theme="dark"] .card {
+  background-color: rgba(26, 26, 31, 0.78) !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+/* Hero 渐变背景（landing） */
+html[data-theme="dark"] .from-white,
+html[data-theme="dark"] .to-white { --tw-gradient-from: #1A1A1F !important; --tw-gradient-to: #1A1A1F !important; }
+/* glass-chip / floating-card / 自适应 hover */
+html[data-theme="dark"] .glass-chip { color: #F4F4F6; }
+/* tab-active 下划线在 dark 下仍是樱粉，OK */
+
+/* ============================================================================
+ * v1.10.2 dark 覆盖加固 —— landing(index.html)仍有亮区的根因：
+ *   · nav 用 bg-white/70（透明度变体，.bg-white 选择器命中不到）
+ *   · 移动端展开菜单 bg-white/95
+ *   · hero 内联白色径向光晕（style 属性，需更高优先级压过）
+ *   · 角落装饰光斑 blob（from-sakura-soft to-transparent）
+ *   · daily-life 渐变卡片 from-sakura-soft/40 → white
+ * 用属性选择器一次性兜底所有变体。
+ * ========================================================================== */
+html[data-theme="dark"] [class*="bg-white"]      { background-color: #1A1A1F !important; }
+html[data-theme="dark"] nav[class*="bg-white"]   { background-color: rgba(18,18,22,0.72) !important; }
+html[data-theme="dark"] [class*="bg-white/95"]   { background-color: rgba(18,18,22,0.96) !important; }
+html[data-theme="dark"] #hero div[style*="radial-gradient"] {
+  background: radial-gradient(circle at 50% 30%, rgba(255,143,184,.12) 0%, rgba(15,15,18,0) 60%) !important;
+}
+html[data-theme="dark"] [class*="from-sakura-soft"] { --tw-gradient-from: rgba(255,143,184,0.10) !important; }
+html[data-theme="dark"] [class*="to-white"]         { --tw-gradient-to:   #1A1A1F !important; }
+html[data-theme="dark"] [class*="text-ink"]         { color: #ECECEF !important; }
+/* 深色 CTA 按钮（a.bg-ink）dark 下略提亮以与背景区分；手机 mockup 的 div.bg-ink 保持纯黑不动 */
+html[data-theme="dark"] a.bg-ink                    { background-color: #33333B !important; }
+
+/* 主题切换浮动按钮（由 theme.js 注入） */
+.xiyu-theme-toggle {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 9999;
+  width: 50px; height: 50px; border-radius: 50%;
+  background: var(--glass-bg-strong, rgba(255,255,255,0.85));
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  border: 1px solid var(--glass-border-soft, rgba(255,255,255,0.45));
+  box-shadow: 0 8px 24px -6px rgba(0,0,0,0.15);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  font-size: 22px;
+  color: var(--ink, #1D1D1F);
+  transition: transform 0.18s var(--ease-silk, ease), box-shadow 0.18s ease;
+}
+.xiyu-theme-toggle:hover { transform: translateY(-2px); box-shadow: 0 12px 32px -6px rgba(0,0,0,0.20); }
+html[data-theme="dark"] .xiyu-theme-toggle {
+  background: rgba(40,40,46,0.85);
+  border-color: rgba(255,255,255,0.08);
+  color: #F4F4F6;
+}
+/* v1.10.2 主题切换引导气泡（首次访问 + 点击反馈） */
+.xiyu-theme-bubble {
+  position: fixed; right: 74px; bottom: 24px; z-index: 9999;
+  max-width: 220px; padding: 8px 12px; border-radius: 12px;
+  background: var(--sakura-deep, #FF8FB8); color: #fff;
+  font-size: 13px; font-weight: 600; line-height: 1.4;
+  box-shadow: 0 8px 24px -6px rgba(255,143,184,0.5);
+  opacity: 0; transform: translateX(8px); pointer-events: none;
+  transition: opacity .25s var(--ease-silk, ease), transform .25s var(--ease-silk, ease);
+}
+.xiyu-theme-bubble.show { opacity: 1; transform: translateX(0); }
+
+/* v1.10.6 叫醒按钮：睡眠中（按钮非 disabled）脉冲发光，更醒目 */
+#btn-sleep-call:not(:disabled) {
+  animation: xiyuWakePulse 1.5s ease-in-out infinite;
+}
+@keyframes xiyuWakePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.55); transform: scale(1); }
+  50%      { box-shadow: 0 0 0 10px rgba(244, 63, 94, 0); transform: scale(1.04); }
+}

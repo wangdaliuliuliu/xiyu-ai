@@ -1,0 +1,28 @@
+description: 经营策略工作台提示词与流程契约回归
+providers:
+  - id: file://promptfoo-provider.mjs
+tests:
+  - description: 渠道与次卡口径不能混淆
+    vars:
+      scenario: channel-card-semantics
+    assert:
+      - type: contains
+        value: "渠道销售统计全部商品"
+      - type: contains
+        value: "次卡只读取独立次卡数据"
+  - description: 因果不足时必须保留边界
+    vars:
+      scenario: causal-boundary
+    assert:
+      - type: contains
+        value: "不得把相关性写成因果"
+      - type: contains
+        value: "原因未知"
+  - description: 经验必须经过验证和人工发布
+    vars:
+      scenario: experience-gate
+    assert:
+      - type: contains
+        value: "候选经验"
+      - type: contains
+        value: "人工审核后发布"

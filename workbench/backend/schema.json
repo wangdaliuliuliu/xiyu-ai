@@ -1,0 +1,44 @@
+{
+  "record": {
+    "key": ["period_id", "venue"],
+    "status": ["draft", "confirmed", "deleted"],
+    "sync_status": ["local", "queued", "success", "failed"],
+    "revision_no": "integer",
+    "period_start": "date",
+    "period_end": "date",
+    "venue": "string",
+    "notes": "string|null"
+  },
+  "feishu_target": {
+    "title": "周报复盘辅助表_简化录入版_v3",
+    "spreadsheet_token": "AEXLs9PcKhKwzatqtu4cLcKJnFc",
+    "spreadsheet_url": "https://my.feishu.cn/sheets/AEXLs9PcKhKwzatqtu4cLcKJnFc",
+    "verified_revision": 50,
+    "sheet_ids": {
+      "录入_周经营": "2e0293",
+      "录入_渠道": "8gIXZX",
+      "录入_客流": "w4P7CA",
+      "录入_票房": "shkW25",
+      "录入_次卡": "AiLcsX",
+      "AI周报": "pMgX2D",
+      "字段说明": "Z5VZvH",
+      "录入_播控": "5AbPph",
+      "录入_次卡累计快照": "8qRgHx"
+    },
+    "write_boundary": "只写入录入_*事实表；AI周报中的经营结论、重点异常、下周动作由周报分析流程单独写入"
+  },
+  "entities": {
+    "weekly_core": {"grain": ["period_id", "venue"], "date_authority": "period_start + period_end", "target": "录入_周经营", "target_sheet_id": "2e0293", "derived_fields": ["box_office_total", "online_sales_amount"]},
+    "daily_metric": {"grain": ["date", "venue"], "date_type": "YYYY-MM-DD", "fields": ["venue_traffic", "box_office"], "metric_note": "venue_traffic is the page's daily traffic field and is not weekly reception_traffic", "targets": ["录入_客流", "录入_票房"], "date_field": "业务日期"},
+    "channel_metric": {"grain": ["period_id", "venue", "channel"], "date_authority": "period_id (current weekly source)", "target": "录入_渠道", "target_sheet_id": "8gIXZX"},
+    "card_metric": {"grain": ["period_id", "venue", "card_type"], "date_authority": "period_id (current weekly source)", "fields": ["orders", "sales_amount", "entitlement_count", "redeemed_count", "source", "notes"], "target": "录入_次卡", "target_sheet_id": "AiLcsX"},
+    "card_cumulative_snapshot": {"grain": ["as_of_date", "venue"], "date_type": "YYYY-MM-DD", "fields": ["five_orders", "five_amount", "ten_orders", "ten_amount", "entitlement_count", "sales_amount", "redeemed_count", "source_rate"], "target": "录入_次卡累计快照", "target_sheet_id": "8qRgHx"},
+    "playback_metric": {"grain": ["period_id", "venue", "project"], "date_authority": "period_id", "fields": ["count"], "target": "录入_播控", "target_sheet_id": "5AbPph"}
+  },
+  "write_policy": {
+    "draft": "local_only",
+    "confirmed": "generate_outbox_after_human_confirmation",
+    "synced": "only_after_feishu_api_ack",
+    "playback": "included_in_outbox_after_human_confirmation"
+  }
+}

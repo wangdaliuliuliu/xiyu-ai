@@ -1,0 +1,23 @@
+[Unit]
+Description=Yuanqu Operations Workbench Feishu API (isolated)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/yuanqu-workbench-api
+Environment=WEEKLY_OPS_HOST=127.0.0.1
+Environment=WEEKLY_OPS_PORT=4175
+Environment=WEEKLY_OPS_RUNTIME_STATE_DIR=/opt/yuanqu-workbench-api/data/runtime-state
+Environment=XIYU_CONTEXT_TOKEN=
+ExecStart=/usr/bin/node /opt/yuanqu-workbench-api/backend/feishu-sync-server.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/opt/yuanqu-workbench-api/data
+
+[Install]
+WantedBy=multi-user.target

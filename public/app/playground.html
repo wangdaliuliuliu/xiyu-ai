@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <script>(function(){try{var p=localStorage.getItem('xiyu_theme')||'auto';var d=p==='dark'||(p==='auto'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.setAttribute('data-theme',d?'dark':'light');}catch(e){}})();</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#FFB6D9" />
+  <title>聊天测试 · 溪语 AI</title>
+  <link rel="icon" href="/logo.png?v=2" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/app/glass.css" />
+  <script>
+    tailwind.config = { theme: { extend: {
+      colors: {
+        sakura: '#FFB6D9', 'sakura-soft': '#FFE8F2', 'sakura-deep': '#FF8FB8',
+        ink: '#1D1D1F', mute: '#86868B', line: '#F0F0F2', cloud: '#FAFAFA',
+      },
+      fontFamily: {
+        sans: ['"PingFang SC"','"HarmonyOS Sans SC"','"Microsoft YaHei"','system-ui','-apple-system','sans-serif'],
+      },
+    }}};
+  </script>
+  <style>
+    body { background: linear-gradient(180deg, #FFF7FB 0%, #FFFFFF 100%); }
+    .card { background: #fff; border: 1px solid #F0F0F2; border-radius: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+    .bubble-them { background: #fff; border: 1px solid #F0F0F2; border-radius: 4px 16px 16px 16px; padding: 10px 14px; max-width: 80%; word-wrap: break-word; }
+    .bubble-me { background: #FF8FB8; color: #fff; border-radius: 16px 4px 16px 16px; padding: 10px 14px; max-width: 80%; word-wrap: break-word; }
+    .typing-dots span { display: inline-block; width: 6px; height: 6px; background: #FFB6D9; border-radius: 50%; margin: 0 2px; animation: typing 1.4s infinite; }
+    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typing { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
+    .pill { background: #FFE8F2; color: #FF8FB8; padding: 2px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+    .route-pill { background:#F7F7FA; border:1px solid #E3E3E8; color:#686875; padding:4px 10px; border-radius:999px; font-size:11px; }
+  </style>
+  <script src="/app/theme.js" defer></script>
+  <script src="/app/i18n.js" defer></script>
+</head>
+<body class="font-sans text-ink min-h-screen">
+
+  <!-- Top bar -->
+  <header class="sticky top-0 z-10 bg-white/85 backdrop-blur border-b border-line">
+    <div class="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
+      <a href="/app/dashboard.html" class="text-mute hover:text-ink text-[20px] leading-none">‹</a>
+      <img id="c-avatar" src="/default-avatar.webp" alt="" class="w-10 h-10 rounded-full" />
+      <div class="flex-1 min-w-0">
+        <p id="c-name" class="text-[15px] font-bold truncate">—</p>
+        <p class="text-[11px] text-mute flex items-center gap-2">
+          <span id="c-stage" class="pill">陌生</span>
+          <span id="c-affection">— / 100</span>
+          <span id="c-mood" class="text-sakura-deep">—</span>
+        </p>
+      </div>
+      <a href="/app/dashboard.html" class="text-[12px] text-mute hover:text-ink whitespace-nowrap">控制台</a>
+    </div>
+  </header>
+
+  <!-- Banner: 解释这是浏览器测试，不是微信 -->
+  <div class="max-w-3xl mx-auto px-4 pt-4">
+    <div class="card p-3 text-[12px] text-mute flex items-start gap-2">
+      <span class="text-sakura-deep">🧪</span>
+      <span><b>⚠️ 你正在与 AI 对话</b>——「她」由人工智能生成、非真人。这是浏览器内 playground，跑的是和微信入站消息**完全相同**的 AI 管线（人设、记忆、心情、好感度都生效），只是不发到微信。</span>
+    </div>
+    <div id="enterprise-route" class="mt-2 hidden route-pill w-fit" aria-live="polite"></div>
+  </div>
+
+  <!-- Messages -->
+  <main id="msgs" class="max-w-3xl mx-auto px-4 py-5 space-y-3 pb-32"></main>
+
+  <!-- Input -->
+  <footer class="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur border-t border-line z-10">
+    <form id="chat-form" class="max-w-3xl mx-auto px-4 py-3 flex items-end gap-2">
+      <textarea id="chat-input" rows="1" placeholder="说点什么…(Enter 发送 / Shift+Enter 换行)"
+        class="flex-1 resize-none bg-cloud border border-line rounded-2xl px-4 py-2.5 text-[14px] focus:outline-none focus:border-sakura placeholder:text-mute"
+        maxlength="2000"></textarea>
+      <button type="button" id="mic-btn" title="按住说话（识别为文字发送）"
+        class="flex-shrink-0 w-10 h-10 grid place-items-center text-sakura-deep border border-sakura-soft rounded-full hover:bg-sakura-soft transition-all">
+        🎙️
+      </button>
+      <button type="submit" id="send-btn"
+        class="flex-shrink-0 px-5 py-2.5 bg-gradient-to-r from-sakura to-sakura-deep text-white text-[13px] font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed">
+        发送
+      </button>
+    </form>
+  </footer>
+
+  <script>
+    // ─── auth ──────────────────────────────────────────────────────────────
+    const userRaw = localStorage.getItem('xiyu_user');
+    const token = localStorage.getItem('xiyu_token');
+    if (!userRaw || !token) { location.href = '/app/auth.html'; }
+
+    function authHeaders() {
+      return { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    }
+
+    const companionId = Number(localStorage.getItem('xiyu_companion_id'));
+    if (!companionId) { location.href = '/app/dashboard.html'; }
+
+    // ─── companion 头部 ────────────────────────────────────────────────────
+    async function loadCompanion() {
+      try {
+        const r = await fetch('/api/companions/' + companionId, { headers: authHeaders() });
+        const d = await r.json();
+        if (!r.ok || !d.ok) return;
+        const c = d.data || {};
+        document.getElementById('c-name').textContent = c.name || '—';
+        document.getElementById('c-avatar').src = c.avatar_url || '/default-avatar.webp';
+        updateState({
+          mood: c.current_mood,
+          affection_level: c.affection_level,
+          relationship_stage: c.relationship_stage,
+        });
+      } catch {}
+    }
+
+    function updateState(state) {
+      if (!state) return;
+      if (state.mood) document.getElementById('c-mood').textContent = state.mood;
+      if (state.affection_level != null) document.getElementById('c-affection').textContent = state.affection_level + ' / 100';
+      if (state.relationship_stage) document.getElementById('c-stage').textContent = state.relationship_stage;
+    }
+
+    // ─── 渲染消息 ──────────────────────────────────────────────────────────
+    const msgs = document.getElementById('msgs');
+    function appendUser(text) {
+      const row = document.createElement('div');
+      row.className = 'flex justify-end';
+      const b = document.createElement('div');
+      b.className = 'bubble-me whitespace-pre-wrap text-[14px]';
+      b.textContent = text;
+      row.appendChild(b);
+      msgs.appendChild(row);
+      scrollEnd();
+    }
+    function appendThem(text) {
+      if (!text) return;
+      const row = document.createElement('div');
+      row.className = 'flex justify-start items-end gap-1.5';
+      const b = document.createElement('div');
+      b.className = 'bubble-them whitespace-pre-wrap text-[14px]';
+      b.textContent = text;
+      row.appendChild(b);
+      // v1.4.0 Sprint 2.5 / v1.4.2: 朗读按钮（TTS 未配时直接不渲染）
+      if (window.__CAPS?.tts) {
+        const playBtn = document.createElement('button');
+        playBtn.type = 'button';
+        playBtn.title = '朗读这条';
+        playBtn.className = 'mb-1 text-[16px] text-sakura-deep/60 hover:text-sakura-deep hover:scale-110 transition-all';
+        playBtn.textContent = '🔊';
+        playBtn.addEventListener('click', () => playTextAsVoice(text, playBtn));
+        row.appendChild(playBtn);
+      }
+      msgs.appendChild(row);
+      scrollEnd();
+    }
+    function appendSticker(s) {
+      const row = document.createElement('div');
+      row.className = 'flex justify-start';
+      const wrap = document.createElement('div');
+      wrap.className = 'bubble-them text-[12px] text-mute';
+      if (s.url) {
+        const img = document.createElement('img');
+        img.src = s.url;
+        img.alt = s.tag || 'sticker';
+        img.style.cssText = 'max-width:120px;border-radius:8px;display:block;';
+        wrap.appendChild(img);
+      } else {
+        wrap.textContent = '[表情: ' + (s.tag || '?') + ']';
+      }
+      row.appendChild(wrap);
+      msgs.appendChild(row);
+      scrollEnd();
+    }
+    function showTyping() {
+      const row = document.createElement('div');
+      row.id = 'typing-row';
+      row.className = 'flex justify-start';
+      const b = document.createElement('div');
+      b.className = 'bubble-them';
+      b.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+      row.appendChild(b);
+      msgs.appendChild(row);
+      scrollEnd();
+    }
+    function hideTyping() {
+      document.getElementById('typing-row')?.remove();
+    }
+    function scrollEnd() {
+      requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight));
+    }
+    function appendSystem(text) {
+      const row = document.createElement('div');
+      row.className = 'flex justify-center';
+      const b = document.createElement('div');
+      b.className = 'text-[11px] text-mute py-1 px-3 bg-cloud rounded-full';
+      b.textContent = text;
+      row.appendChild(b);
+      msgs.appendChild(row);
+      scrollEnd();
+    }
+
+    // ─── 加载最近对话历史 ─────────────────────────────────────────────────
+    async function loadHistory() {
+      try {
+        const r = await fetch('/api/companions/' + companionId + '/context?limit=20', { headers: authHeaders() });
+        const d = await r.json();
+        if (!r.ok || !d.ok) return;
+        const turns = d.data?.turns || d.data || [];
+        for (const t of turns) {
+          if (t.role === 'user') appendUser(t.content);
+          else if (t.role === 'assistant') {
+            // 历史 assistant 内容可能含 || 分段，拆开展示更自然
+            const segs = String(t.content || '').split(/\s*(?:\|\||｜｜)\s*/g).map(s => s.trim()).filter(Boolean);
+            if (segs.length) for (const s of segs) appendThem(s);
+            else appendThem(t.content);
+          }
+        }
+        if (turns.length === 0) appendSystem('打个招呼，开始聊天吧');
+      } catch {}
+    }
+
+    // ─── 发送 ──────────────────────────────────────────────────────────────
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('send-btn');
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+    });
+
+    let busy = false;
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      const text = input.value.trim();
+      if (!text) return;
+      busy = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = '发送中…';
+      appendUser(text);
+      input.value = '';
+      input.style.height = 'auto';
+      showTyping();
+
+      try {
+        const r = await fetch('/api/companions/' + companionId + '/playground-chat', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ text }),
+        });
+        const d = await r.json();
+        hideTyping();
+        if (!r.ok || !d.ok) throw new Error(d.message || d.error || '请求失败');
+        if (d.data?.sleeping) {
+          appendSystem('💤 她睡着了，现在是她的睡眠时间。消息已收到，她起床后会回你～想现在叫醒她，去控制台点「📞 打电话叫醒她」。');
+          return;
+        }
+        const segs = d.data?.segments || [];
+        // 逐条展示，模拟"先发一条再发下一条"
+        for (let i = 0; i < segs.length; i++) {
+          const seg = segs[i];
+          if (i > 0) {
+            // 段间小停顿
+            await new Promise(rr => setTimeout(rr, 350 + Math.random() * 500));
+          }
+          if (seg.text) appendThem(seg.text);
+          for (const s of seg.stickers || []) appendSticker(s);
+        }
+        updateState(d.data?.state);
+        const enterprise = d.data?.enterprise;
+        const routeEl = document.getElementById('enterprise-route');
+        if (routeEl && enterprise?.enabled) {
+          routeEl.textContent = `本轮：${enterprise.label}｜调用 ${enterprise.retrievedCount || 0} 条经营资料｜记忆分流${enterprise.memoryFirewall ? '已开启' : '未开启'}`;
+          routeEl.classList.remove('hidden');
+        }
+      } catch (err) {
+        hideTyping();
+        appendSystem('❌ ' + err.message);
+      } finally {
+        busy = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = '发送';
+        input.focus();
+      }
+    });
+
+    // ─── v1.4.0 Sprint 2.5: 朗读 & 录音 ──────────────────────────────────────
+    // 朗读：调 /tts-preview 拿 mp3，浏览器 Audio 播。多次点击不会叠播。
+    let _voiceAudio = null;
+    async function playTextAsVoice(text, btnEl) {
+      try {
+        if (!text || text.length > 100) {
+          // 超长截断到 100 字（与后端路由上限一致）
+          text = String(text).slice(0, 100);
+        }
+        if (_voiceAudio) { _voiceAudio.pause(); _voiceAudio = null; }
+        if (btnEl) btnEl.style.opacity = '0.4';
+        const r = await fetch('/api/companions/' + companionId + '/tts-preview', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.error || ('HTTP ' + r.status));
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        _voiceAudio = new Audio(url);
+        _voiceAudio.onended = _voiceAudio.onerror = () => { if (btnEl) btnEl.style.opacity = ''; };
+        await _voiceAudio.play();
+      } catch (e) {
+        if (btnEl) btnEl.style.opacity = '';
+        appendSystem('❌ 朗读失败：' + e.message);
+      }
+    }
+
+    // 录音：MediaRecorder API → base64 → /asr-transcribe → 把文本填进输入框 + 自动发
+    const micBtn = document.getElementById('mic-btn');
+    let mediaRec = null;
+    let micChunks = [];
+    let micStream = null;
+    micBtn.addEventListener('click', async () => {
+      if (mediaRec && mediaRec.state === 'recording') {
+        // 第二次点击 → 停止录音
+        try { mediaRec.stop(); } catch {}
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        appendSystem('❌ 浏览器不支持麦克风');
+        return;
+      }
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        appendSystem('❌ 无法访问麦克风：' + (e.message || '已拒绝授权'));
+        return;
+      }
+      // 选 mime：优先 webm/opus（ASR 普遍支持），fallback 浏览器默认
+      let mime = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mime)) mime = 'audio/webm';
+      if (!MediaRecorder.isTypeSupported(mime)) mime = '';
+      mediaRec = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined);
+      micChunks = [];
+      mediaRec.ondataavailable = e => { if (e.data.size) micChunks.push(e.data); };
+      mediaRec.onstop = async () => {
+        // 关麦克风
+        for (const t of micStream.getTracks()) t.stop();
+        const blob = new Blob(micChunks, { type: mediaRec.mimeType || 'audio/webm' });
+        micBtn.textContent = '🎙️';
+        micBtn.classList.remove('bg-sakura-soft');
+        if (blob.size < 300) { appendSystem('录音太短了～'); return; }
+        if (blob.size > 1.5 * 1024 * 1024) { appendSystem('录音太长了，请保持在一分钟内'); return; }
+        // base64
+        const b64 = await blobToBase64(blob);
+        micBtn.disabled = true;
+        try {
+          const r = await fetch('/api/companions/' + companionId + '/asr-transcribe', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ audio_base64: b64, mime: blob.type.split(';')[0] }),
+          });
+          const d = await r.json();
+          if (!r.ok || !d.ok) throw new Error(d.error || '识别失败');
+          const text = (d.data?.text || '').trim();
+          if (!text) { appendSystem('没识别到内容～'); return; }
+          input.value = text;
+          input.dispatchEvent(new Event('input'));
+          form.requestSubmit();
+        } catch (e) {
+          appendSystem('❌ 识别失败：' + e.message);
+        } finally {
+          micBtn.disabled = false;
+        }
+      };
+      mediaRec.start();
+      micBtn.textContent = '⏹️';
+      micBtn.classList.add('bg-sakura-soft');
+    });
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onloadend = () => {
+          const s = String(r.result || '');
+          const i = s.indexOf(',');
+          resolve(i >= 0 ? s.slice(i + 1) : s);
+        };
+        r.onerror = reject;
+        r.readAsDataURL(blob);
+      });
+    }
+
+    // ─── go ────────────────────────────────────────────────────────────────
+    // v1.4.2: 探测能力，决定 🔊/🎙️ 是否渲染
+    window.__CAPS = { tts: false };
+    fetch('/api/me/capabilities', { headers: { Authorization: 'Bearer ' + token } })
+      .then(r => r.json()).then(d => {
+        if (d?.ok) window.__CAPS = d.data || window.__CAPS;
+        // mic 按钮：TTS 没配也允许（ASR 是另一回事）；只在 ASR 调用失败时报错。这里暂不藏 mic
+      })
+      .catch(() => {})
+      .finally(() => loadCompanion().then(() => loadHistory()));
+  </script>
+</body>
+</html>
