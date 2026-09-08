@@ -26,6 +26,7 @@ from evaluation.deterministic import DeterministicSuite  # noqa: E402
 from evaluation.harness import HarnessSelftest  # noqa: E402
 from evaluation.parity import compare_resource_manifest, compare_sqlite  # noqa: E402
 from evaluation.isolation import run_isolation_probe  # noqa: E402
+from evaluation.dependencies import check_dependencies  # noqa: E402
 from export.discover import create_snapshot, sha256_file  # noqa: E402
 from runtime.context import ContextBuilder  # noqa: E402
 from runtime.loop import AgencyLoop  # noqa: E402
@@ -78,11 +79,27 @@ def requirement_map() -> dict[str, Any]:
     families = [f"{group}{i:02d}" for group in "ABCD" for i in range(1, 7)]
     return {
         "schemaVersion": "requirement-map-v2", "createdAt": utc_now(),
-        "goals": {key: {"requirement": value, "status": "not_run", "fixture_branches": [], "evidence": []} for key, value in goals.items()},
-        "families": {key: {"status": "not_run", "branches": [], "evidence": []} for key in families},
-        "reliability": {f"R{i:02d}": {"status": "not_run", "evidence": []} for i in range(1, 13)},
-        "integration": {f"I{i:02d}": {"status": "not_run", "evidence": []} for i in range(1, 13)},
+        "goals": {key: {"requirement": value, "status": "not_run", "fixture_branches": ["planned_branch:" + key], "evidence": []} for key, value in goals.items()},
+        "families": {key: {"status": "not_run", "branches": ["normal", "failure", "recovery"], "evidence": []} for key in families},
+        "reliability": {f"R{i:02d}": {"status": "not_run", "fixture_branches": ["normal", "failure", "recovery"], "evidence": []} for i in range(1, 13)},
+        "integration": {f"I{i:02d}": {"status": "not_run", "fixture_branches": ["normal", "failure", "recovery"], "evidence": []} for i in range(1, 13)},
         "mutations": {key: {"status": "not_run", "normal_control": None, "failure_evidence": None} for key in [f"M{i:02d}" for i in range(1, 17)] + [f"X{i:02d}" for i in range(1, 25)]},
+    }
+
+
+def component_map() -> dict[str, Any]:
+    return {
+        "schemaVersion": "component-map-v2",
+        "root": str(V2_ROOT) if "V2_ROOT" in globals() else "experiments/ideal-agency-lab/v2",
+        "unique_cli": "cli.py",
+        "components": {
+            "controller": ["boundary.py", "gateway.py", "lifecycle.py"], "export": ["discover.py"],
+            "contracts": ["schemas.py"], "runtime": ["context.py", "loop.py", "policy.py", "store.py", "prompts/assemble.py", "prompts/base.json"],
+            "adapters": ["local.py"], "transport": ["sink.py"], "fixtures": ["public_state.json"],
+            "evaluation": ["coverage.py", "deterministic.py", "evidence.py", "harness.py", "isolation.py", "parity.py"], "tests": ["__init__.py"],
+        },
+        "formal_path": "cli.py -> controller -> contracts -> runtime/context -> runtime/loop -> adapters/transport -> runtime/store -> evaluation",
+        "production_reference_only": ["src/", "config/", "index.mjs", "scripts/lab_*.py", "scripts/lab_*.mjs"],
     }
 
 
@@ -106,6 +123,7 @@ def freeze(args: argparse.Namespace) -> pathlib.Path:
     })
     json_write(run_root / "requirement-map.json", requirement_map())
     json_write(run_root / "source-module-map.json", source_module_map())
+    json_write(run_root / "component-map.json", component_map())
     config_path = REPO_ROOT / "config" / "agency-prompts.v1.json"
     config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
     json_write(run_root / "config-synthesis.json", {"source": str(config_path), "sha256": sha256_file(config_path) if config_path.exists() else None, "blocks": [{"name": name, "type": type(value).__name__, "chars": len(json.dumps(value, ensure_ascii=False)), "value_hash": hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()} for name, value in config.items()]})
@@ -135,13 +153,22 @@ def run_e0(run_root: pathlib.Path) -> dict[str, Any]:
     result = {"status": "passed" if sqlite_result["status"] == "passed" and manifest_result["status"] == "passed" else "failed", "sqlite": sqlite_result, "manifest": manifest_result}
     result["source_locator"] = str(source_db); result["replica_locator"] = str(replica_db)
     json_write(run_root / "replica-parity.json", result)
-    environment_path = run_root / "environment.json"; environment = json.loads(environment_path.read_text(encoding="utf-8")); environment["e0"] = result["status"]; json_write(environment_path, environment)
+    environment_path = run_root / "environment.json"; environment = json.loads(environment_path.read_text(encoding="utf-8")); environment["e0"] = result["status"] if inventory["source"].get("authorization_status") == "verified" else "inconclusive_source_identity_unverified"; json_write(environment_path, environment)
+    refresh_report(run_root)
     return result
 
 
 def run_e1(run_root: pathlib.Path) -> dict[str, Any]:
     result = run_isolation_probe(run_root, REPO_ROOT)
     environment_path = run_root / "environment.json"; environment = json.loads(environment_path.read_text(encoding="utf-8")) if environment_path.exists() else {}; environment["e1"] = result["status"]; json_write(environment_path, environment)
+    refresh_report(run_root)
+    return result
+
+
+def run_dependency_check(run_root: pathlib.Path) -> dict[str, Any]:
+    result = check_dependencies(V2_ROOT)
+    json_write(run_root / "dependency-check.json", result)
+    json_write(run_root / "component-map.json", component_map())
     return result
 
 
@@ -154,7 +181,7 @@ def run_selftest(run_root: pathlib.Path) -> dict[str, Any]:
         if entry:
             entry["status"] = item["status"]; entry["failure"] = [str(run_root / "selftest.json")]
     coverage["status"] = "passed" if result["status"] == "passed" else "failed"; write_coverage(coverage_path, coverage)
-    environment_path = run_root / "environment.json"; environment = json.loads(environment_path.read_text(encoding="utf-8")) if environment_path.exists() else {}; environment["e1"] = result["status"]; environment["e2"] = "passed" if result["status"] == "passed" else "failed"; json_write(environment_path, environment)
+    environment_path = run_root / "environment.json"; environment = json.loads(environment_path.read_text(encoding="utf-8")) if environment_path.exists() else {}; environment["harness_selftest"] = result["status"]; json_write(environment_path, environment)
     return result
 
 
@@ -162,24 +189,44 @@ def run_e2(run_root: pathlib.Path) -> dict[str, Any]:
     result = DeterministicSuite(run_root, FIXTURE, PROMPT).run()
     json_write(run_root / "e2-deterministic.json", result)
     environment_path = run_root / "environment.json"; environment = json.loads(environment_path.read_text(encoding="utf-8")) if environment_path.exists() else {}; environment["e2"] = result["status"]; json_write(environment_path, environment)
+    refresh_report(run_root)
     return result
 
 
+def refresh_report(run_root: pathlib.Path) -> None:
+    environment = json.loads((run_root / "environment.json").read_text(encoding="utf-8")) if (run_root / "environment.json").exists() else {}
+    selftest = json.loads((run_root / "selftest.json").read_text(encoding="utf-8")) if (run_root / "selftest.json").exists() else {}
+    e2 = json.loads((run_root / "e2-deterministic.json").read_text(encoding="utf-8")) if (run_root / "e2-deterministic.json").exists() else {}
+    parity = json.loads((run_root / "replica-parity.json").read_text(encoding="utf-8")) if (run_root / "replica-parity.json").exists() else {}
+    hard_failed = selftest.get("status") == "failed" or e2.get("status") == "failed" or parity.get("status") == "failed"
+    overall = "failed" if hard_failed else "inconclusive"
+    lines = ["# Ideal Agency Lab v2", "", f"总体状态：`{overall}`", "", "## 阶段", "", f"- W00 freeze：completed（run `{run_root.name}`）", f"- E0 replica parity：{parity.get('status', 'not_run')}；源身份：{environment.get('e0', 'not_run')}", f"- E1 isolation：{environment.get('e1', 'not_run')}（OS/container qualification required）", f"- E2 deterministic contracts：{environment.get('e2', 'not_run')}；selftest：{selftest.get('passed', 0)}/{selftest.get('total', 0)}", "- E3 real API smoke：not_started / gated", "", "## 明确未完成", "", "- 阿里云有效实例/授权关系链独立核验与线上只读导出。", "- 可验证的 OS/container worker 隔离与独立 provider gateway。", "- 真实 API E3、24 族固定套件、第二模型、留出、图片审图、7 日连续性、性能与人工盲评。", "- 生产入口、真实 Bot 投递、部署与线上观察（本轮不在授权范围）。", "", "生产代码、配置、依赖与真实 Bot 均未由本实验写入。"]
+    (run_root / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def run_smoke(run_root: pathlib.Path, args: argparse.Namespace) -> dict[str, Any]:
+    environment = json.loads((run_root / "environment.json").read_text(encoding="utf-8")) if (run_root / "environment.json").exists() else {}
+    gate = {key: environment.get(key) for key in ("e0", "e1", "e2")}
+    if gate != {"e0": "passed", "e1": "passed", "e2": "passed"}:
+        result = {"status": "inconclusive", "reason": "E0/E1/E2 gate is not qualified; real provider call was blocked", "gate": gate}
+        json_write(run_root / "smoke-result.json", result); refresh_report(run_root); return result
     if not args.endpoint:
         result = {"status": "inconclusive", "reason": "provider endpoint not supplied; no real API call made", "mode": "FROZEN"}
-        json_write(run_root / "smoke-result.json", result); return result
+        json_write(run_root / "smoke-result.json", result); refresh_report(run_root); return result
     # Credentials are read only from the process environment and never emitted.
     import os
     endpoint = args.endpoint
     from controller.boundary import NetworkBoundary
-    network = NetworkBoundary({__import__("urllib.parse").parse.urlparse(endpoint).hostname or ""}, {__import__("urllib.parse").parse.urlparse(endpoint).path})
+    from urllib.parse import urlparse
+    parsed_endpoint = urlparse(endpoint)
+    network = NetworkBoundary({parsed_endpoint.hostname or ""}, {parsed_endpoint.path})
     gateway = HttpProviderGateway(model_name=args.model, endpoint=endpoint, network_boundary=network, api_key=os.environ.get("IDEAL_LAB_PROVIDER_API_KEY"))
     trajectory = run_root / "smoke-trajectories" / "provider"
     trajectory.mkdir(parents=True, exist_ok=True)
-    store = EventStore(trajectory / "state.db"); sink = RecordingSink(trajectory / "traces" / "sink.jsonl"); loop = AgencyLoop(store=store, context=ContextBuilder(FIXTURE, PROMPT), adapters=__import__("adapters.local", fromlist=["LocalAdapters"]).LocalAdapters(FIXTURE), policy=Policy(store, writable_root=trajectory), gateway=gateway, sink=sink, trace_path=trajectory / "traces" / "trace.jsonl")
+    from adapters.local import LocalAdapters
+    store = EventStore(trajectory / "state.db"); sink = RecordingSink(trajectory / "traces" / "sink.jsonl"); loop = AgencyLoop(store=store, context=ContextBuilder(FIXTURE, PROMPT), adapters=LocalAdapters(FIXTURE), policy=Policy(store, writable_root=trajectory), gateway=gateway, sink=sink, trace_path=trajectory / "traces" / "trace.jsonl")
     event = {"event_id": "smoke-provider-001", "owner": "owner-a", "kind": "user_message", "virtual_time": "2026-09-08T10:00:00+08:00", "payload": {"text": "请直接处理当前问题并给出有依据的结果"}}
-    result = loop.process_event(event); store.close(); json_write(run_root / "smoke-result.json", {"status": "completed", "result": result, "model": args.model, "endpoint_host": network.allowed_hosts})
+    result = loop.process_event(event); store.close(); json_write(run_root / "smoke-result.json", {"status": "completed", "result": result, "model": args.model, "endpoint_host": network.allowed_hosts}); refresh_report(run_root)
     return result
 
 
@@ -187,7 +234,7 @@ def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Ideal Agency Lab v2 formal runner")
     sub = ap.add_subparsers(dest="command", required=True)
     freeze_cmd = sub.add_parser("freeze"); freeze_cmd.add_argument("--source-db", default=str(REPO_ROOT / "data" / "bot.db")); freeze_cmd.add_argument("--workbench", default=r"E:\Yuanqu-Operations-Workbench\weekly-ops-entry"); freeze_cmd.add_argument("--mode", choices=["EXPORT", "FROZEN", "LIVE-READONLY"], default="FROZEN"); freeze_cmd.add_argument("--run", default="")
-    for name in ("e0", "e1", "selftest", "e2", "report"):
+    for name in ("e0", "e1", "selftest", "e2", "deps", "report"):
         cmd = sub.add_parser(name); cmd.add_argument("--run", required=True)
     smoke = sub.add_parser("smoke"); smoke.add_argument("--run", required=True); smoke.add_argument("--endpoint", default=""); smoke.add_argument("--model", default="configured-model")
     return ap
@@ -202,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "e1": print(json.dumps(run_e1(run_root), ensure_ascii=False)); return 0
     if args.command == "selftest": print(json.dumps(run_selftest(run_root), ensure_ascii=False)); return 0
     if args.command == "e2": print(json.dumps(run_e2(run_root), ensure_ascii=False)); return 0
+    if args.command == "deps": print(json.dumps(run_dependency_check(run_root), ensure_ascii=False)); return 0
     if args.command == "smoke": print(json.dumps(run_smoke(run_root, args), ensure_ascii=False)); return 0
     if args.command == "report":
         status = "inconclusive"; selftest = run_root / "selftest.json"; parity = run_root / "replica-parity.json"

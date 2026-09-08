@@ -161,6 +161,13 @@ class EventStore:
     def action(self, action_id: str, owner: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM actions WHERE action_id=? AND owner=?", (action_id, owner)).fetchone()
 
+    def latest_action(self, owner: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM actions WHERE owner=? ORDER BY created_at DESC LIMIT 1", (owner,)).fetchone()
+
+    def delivered_segments(self, owner: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT segment_id,action_id,status,receipt_json,created_at FROM sink_deliveries WHERE owner=? ORDER BY created_at", (owner,)).fetchall()
+        return [dict(row) for row in rows]
+
     def update_action(self, action_id: str, owner: str, state: str, result: dict[str, Any] | None = None) -> None:
         self.conn.execute("UPDATE actions SET state=?,result_json=?,updated_at=? WHERE action_id=? AND owner=?", (state, json.dumps(result, ensure_ascii=False) if result is not None else None, now_iso(), action_id, owner))
 

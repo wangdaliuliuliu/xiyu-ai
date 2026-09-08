@@ -72,6 +72,12 @@ class AgencyLoop:
         self.store.configure_budget(owner)
         self._trace(owner, event["event_id"], 0, {"kind": "input", "input": event, "event_version": event_version})
         try:
+            if event["kind"] == "silence_observed":
+                latest = self.store.latest_action(owner)
+                if latest:
+                    self.store.record_feedback(owner, latest["action_id"], "silence_observed", "none", "", event["payload"])
+                self._trace(owner, event["event_id"], 1, {"kind": "silence_observed", "action_id": latest["action_id"] if latest else None})
+                return {"status": "observed", "event_id": event["event_id"], "path_id": "P15", "action_id": latest["action_id"] if latest else None}
             return self._decision_cycle(event, thread_id, event_version)
         except (ContractError, ContextError, PolicyError, AdapterError, StoreError) as exc:
             self._trace(owner, event["event_id"], 999, {"kind": "failure", "error": type(exc).__name__, "message": str(exc)})
@@ -82,7 +88,9 @@ class AgencyLoop:
     def _decision_cycle(self, event: dict[str, Any], thread_id: str, event_version: int) -> dict[str, Any]:
         owner = event["owner"]
         thread = self.store.get_thread(owner)
-        context = self.context_builder.build(event, thread_state=dict(thread) if thread else {})
+        thread_state = dict(thread) if thread else {}
+        thread_state["delivered_segments"] = self.store.delivered_segments(owner)
+        context = self.context_builder.build(event, thread_state=thread_state)
         prompt = assemble(context, event=event)
         first = self._provider_call(owner, event, prompt, 1)
         if first.error:
@@ -99,8 +107,10 @@ class AgencyLoop:
                 raise PolicyError("unknown_intention_or_owner")
         if intention is None:
             intention_id = self.store.create_intention(owner, thread_id, decision["desired_change"], decision["action"]["type"] == "wait")
+            intention_version = 0
         else:
             intention_id = intention["intention_id"]
+            intention_version = intention["version"]
         action = decision["action"]
         action_type = action["type"]
         self.policy.check_action(owner, event, action, thread_version=event_version)
@@ -110,16 +120,16 @@ class AgencyLoop:
         if action_type == "wait":
             self.policy.validate_wait(decision["reconsider_condition"])
             self.store.update_action(action_id, owner, "prepared", {"reconsider_condition": decision["reconsider_condition"]})
-            self.store.update_intention(intention_id, owner, 0, "active", True)
+            self.store.update_intention(intention_id, owner, intention_version, "active", True)
             return {"status": "waiting", "event_id": event["event_id"], "path_id": "P12", "intention_id": intention_id, "action_id": action_id}
         if action_type == "none":
             self.store.update_action(action_id, owner, "prepared", {"operation": decision["operation"]})
             return {"status": "prepared", "event_id": event["event_id"], "path_id": "P03" if event["kind"] == "user_message" else "P05", "intention_id": intention_id, "action_id": action_id}
         if action_type == "deliver":
-            return self._deliver(event, event_version, intention_id, action_id, decision["messages"])
-        return self._run_tool_then_continue(event, event_version, intention_id, action_id, action_type, action.get("args", {}), action_args, arg_diff, context)
+            return self._deliver(event, event_version, intention_id, intention_version, action_id, decision["messages"], needs_user_input=bool(decision.get("expected_participation")))
+        return self._run_tool_then_continue(event, event_version, intention_id, intention_version, action_id, action_type, action.get("args", {}), action_args, arg_diff, context)
 
-    def _run_tool_then_continue(self, event: dict[str, Any], event_version: int, intention_id: str, action_id: str, action_type: str, original_args: dict[str, Any], args: dict[str, Any], arg_diff: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    def _run_tool_then_continue(self, event: dict[str, Any], event_version: int, intention_id: str, intention_version: int, action_id: str, action_type: str, original_args: dict[str, Any], args: dict[str, Any], arg_diff: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         owner = event["owner"]
         self.store.update_action(action_id, owner, "running")
         self.policy.consume(owner, "tool")
@@ -141,12 +151,14 @@ class AgencyLoop:
             return {"status": "schema_failure", "event_id": event["event_id"], "path_id": "P13", "intention_id": intention_id, "action_id": action_id, "error": str(exc)}
         if next_decision["action"]["type"] != "deliver":
             if next_decision["action"]["type"] == "wait":
-                self.store.update_intention(intention_id, owner, 0, "active", True)
+                self.store.update_intention(intention_id, owner, intention_version, "active", True)
                 return {"status": "waiting", "event_id": event["event_id"], "path_id": "P12", "intention_id": intention_id, "action_id": action_id}
             return {"status": "prepared", "event_id": event["event_id"], "path_id": "P13" if result["status"] != "complete" else "P02", "intention_id": intention_id, "action_id": action_id, "tool_status": result["status"]}
-        return self._deliver(event, event_version, intention_id, action_id, next_decision["messages"], tool_status=result["status"])
+        if next_decision.get("intention_ref") not in (None, intention_id):
+            raise PolicyError("continuation_intention_mismatch")
+        return self._deliver(event, event_version, intention_id, intention_version, action_id, next_decision["messages"], tool_status=result["status"], needs_user_input=bool(next_decision.get("expected_participation")))
 
-    def _deliver(self, event: dict[str, Any], event_version: int, intention_id: str, action_id: str, messages: list[str], *, tool_status: str | None = None) -> dict[str, Any]:
+    def _deliver(self, event: dict[str, Any], event_version: int, intention_id: str, intention_version: int, action_id: str, messages: list[str], *, tool_status: str | None = None, needs_user_input: bool = False) -> dict[str, Any]:
         owner = event["owner"]
         self.policy.can_deliver_current(owner, event_version, self.store.get_thread(owner)["version"])
         self.store.update_action(action_id, owner, "ready", {"tool_status": tool_status, "messages": messages})
@@ -159,7 +171,7 @@ class AgencyLoop:
         statuses = {receipt["status"] for receipt in receipts}
         if statuses == {"delivered"}:
             final_state = "delivered"
-            intention_state = "awaiting_user" if tool_status is None and False else "completed"
+            intention_state = "awaiting_user" if needs_user_input else "completed"
             path_id = "P11" if tool_status is not None else "P03"
         elif "partial" in statuses:
             final_state = "partial"; intention_state = "active"; path_id = "P14"
@@ -168,6 +180,6 @@ class AgencyLoop:
         else:
             final_state = "failed"; intention_state = "active"; path_id = "P14"
         self.store.update_action(action_id, owner, final_state, {"receipts": receipts})
-        self.store.update_intention(intention_id, owner, 0, intention_state, intention_state == "awaiting_user")
+        self.store.update_intention(intention_id, owner, intention_version, intention_state, intention_state == "awaiting_user")
         self._trace(owner, event["event_id"], 6, {"kind": "delivery", "action_id": action_id, "final_state": final_state, "receipts": receipts})
         return {"status": final_state, "event_id": event["event_id"], "path_id": path_id, "intention_id": intention_id, "action_id": action_id, "receipts": receipts}

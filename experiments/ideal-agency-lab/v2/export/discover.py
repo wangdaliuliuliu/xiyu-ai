@@ -264,6 +264,7 @@ def create_snapshot(repo_root: pathlib.Path, run_root: pathlib.Path, source_db: 
             "workbenchRoot": str(workbench_root),
             "gitRevision": git_revision(repo_root),
             "timezone": "Asia/Shanghai",
+            "authorization_status": "unverified_local_source",
         },
         "tables": tables,
         "settings": settings,
