@@ -126,6 +126,21 @@ def _safe_settings(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return rows
 
 
+def _identity_map(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Export ownership identifiers, never binding/session credentials."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"wechat_accounts", "companions"}.issubset(tables):
+        return []
+    rows = conn.execute(
+        "SELECT wa.account_id, wa.user_id, wa.companion_id, wa.wechat_user_id, c.user_id AS companion_user_id, c.bot_id "
+        "FROM wechat_accounts wa LEFT JOIN companions c ON c.id=wa.companion_id ORDER BY wa.account_id, wa.companion_id"
+    ).fetchall()
+    return [{
+        "account_id": row[0], "binding_user_id": row[1], "companion_id": row[2], "wechat_user_id": row[3],
+        "companion_user_id": row[4], "bot_id": row[5], "source_ref": "sqlite://wechat_accounts+companions",
+    } for row in rows]
+
+
 def _backup_readonly_db(source_db: pathlib.Path, replica_db: pathlib.Path) -> None:
     source_uri = f"file:{source_db.as_posix()}?mode=ro"
     source = sqlite3.connect(source_uri, uri=True)
@@ -247,11 +262,18 @@ def create_snapshot(repo_root: pathlib.Path, run_root: pathlib.Path, source_db: 
     try:
         tables = sqlite_inventory(source)
         settings = _safe_settings(source)
+        identity_map = _identity_map(source)
     finally:
         source.close()
     _backup_readonly_db(source_db, db_target)
     transformations = _scrub_replica_db(db_target)
     copied, excluded = _copy_data_tree(workbench_root / "data", snapshot / "workbench-data")
+    asset_copied, asset_excluded = _copy_data_tree(workbench_root / "assets", snapshot / "workbench-assets")
+    for resource in asset_copied:
+        resource["resource_id"] = "asset:" + resource["resource_id"].removeprefix("file:")
+        resource["owner_scope"] = "workbench-assets"
+    copied.extend(asset_copied)
+    excluded.extend(asset_excluded)
     resources = _source_file_resources(repo_root)
     resources.extend(copied)
     inventory = {
@@ -268,12 +290,13 @@ def create_snapshot(repo_root: pathlib.Path, run_root: pathlib.Path, source_db: 
         },
         "tables": tables,
         "settings": settings,
+        "identity_map": identity_map,
         "resources": resources,
         "excluded": excluded,
         "replica": {"database": str(db_target), "content_hash": sha256_file(db_target)},
         "transformations": transformations,
     }
     (run_root / "inventory.json").write_text(json.dumps(inventory, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (run_root / "id-map.json").write_text(json.dumps({"schemaVersion": "id-map-v2", "mappings": [], "status": "pending_authorized_relation_export"}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (run_root / "id-map.json").write_text(json.dumps({"schemaVersion": "id-map-v2", "mappings": inventory["identity_map"], "status": "local_source_mapping_only", "authorization_status": inventory["source"].get("authorization_status")}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (run_root / "replica-parity.json").write_text(json.dumps({"status": "pending", "reason": "E0 evaluator not yet run", "resource_count": len(resources)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return inventory

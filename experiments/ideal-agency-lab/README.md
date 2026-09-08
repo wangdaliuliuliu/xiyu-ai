@@ -1,16 +1,18 @@
-# 理想链路隔离实验
+# 理想链路隔离实验 v2
 
-这套实验不启动生产主动调度器，不使用真实 Bot 投递凭据，也不写生产数据库。它把西宇数据库和工作台运行态复制到 `runs/<timestamp>/snapshot`，对副本做一致性核验，再用已配置的真实对话 API 做最小多轮冒烟。
-
-当前工作站的 Node 原生 SQLite 模块与 Node 24 不兼容，因此数据盘点、对账和冒烟的可执行入口使用 Python 标准库；证据验收器自检仍由 Node 脚本运行。
+正式实验入口只有 `v2/cli.py`。它不启动生产主动调度器，不使用真实 Bot 投递凭据，不写生产数据库；每个 run 都是唯一目录，所有失败证据保留。
 
 ```powershell
-python scripts/lab_discover.py
-python scripts/lab_parity.py --run experiments/ideal-agency-lab/runs/<timestamp>
-node scripts/lab_selftest.mjs --run experiments/ideal-agency-lab/runs/<timestamp>
-python scripts/lab_smoke.py --run experiments/ideal-agency-lab/runs/<timestamp>
-python scripts/lab_finalize.py --run experiments/ideal-agency-lab/runs/<timestamp>
+$run = python v2/cli.py freeze --mode FROZEN
+python v2/cli.py e0 --run <run-directory>
+python v2/cli.py e1 --run <run-directory>
+python v2/cli.py deps --run <run-directory>
+python v2/cli.py selftest --run <run-directory>
+python v2/cli.py e2 --run <run-directory>
+python v2/cli.py smoke --run <run-directory>
+python v2/cli.py report --run <run-directory>
 ```
 
-`lab_smoke.py` 的输出只进入 `sink://ideal-lab`，并且只覆盖规范中的 I01/I03 最小冒烟。它生成的 `report.md` 若为 `inconclusive`，表示前置证据通过但固定 24 族、留出、图片、7 天连续性和人工盲评还没执行，不能当成产品通过。
+`smoke` 只有在 E0/E1/E2 全部具备资格时才允许 provider 调用；它永远不会向真实 Bot 发送消息。旧 `scripts/lab_*` 与旧 run 仅登记为历史参照，不产生 v2 正式成绩。
 
+当前 run 的完整结论必须以 `report.md` 为准：本地逐值对账、验收器自检和确定性合同可以通过，但缺少已核验线上源身份与 OS/container 隔离时，整体只能是 `inconclusive`。

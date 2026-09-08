@@ -76,11 +76,26 @@ class HttpProviderGateway:
         request = urllib.request.Request(self.endpoint, data=payload, headers=headers, method="POST")
         started = time.perf_counter()
         request_id = str(uuid.uuid4())
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310 - endpoint checked above
+            opener = urllib.request.build_opener(NoRedirect)
+            with opener.open(request, timeout=90) as response:  # endpoint was checked above
                 raw = response.read()
-            content = json.loads(raw.decode("utf-8"))
-            return ProviderResponse(request_id, self.model_name, content, usage=None, latency_ms=int((time.perf_counter() - started) * 1000))
+            envelope = json.loads(raw.decode("utf-8"))
+            usage = envelope.get("usage") if isinstance(envelope, dict) else None
+            content: Any = envelope
+            if isinstance(envelope, dict) and isinstance(envelope.get("choices"), list) and envelope["choices"]:
+                choice = envelope["choices"][0]
+                message = choice.get("message", {}) if isinstance(choice, dict) else {}
+                content = message.get("content", choice.get("text") if isinstance(choice, dict) else None)
+                if isinstance(content, str):
+                    try:
+                        content = json.loads(content)
+                    except json.JSONDecodeError:
+                        pass
+            return ProviderResponse(request_id, self.model_name, content, usage=usage, latency_ms=int((time.perf_counter() - started) * 1000))
         except (OSError, ValueError, urllib.error.URLError) as exc:
             return ProviderResponse(request_id, self.model_name, {}, finish_reason="error", usage=None, latency_ms=int((time.perf_counter() - started) * 1000), error=type(exc).__name__)
-
