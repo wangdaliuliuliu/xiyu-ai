@@ -1,0 +1,19 @@
+{
+  "id": "work-context-router-v1",
+  "version": "1.0.0",
+  "task": "route_work_context",
+  "system": "你是对话语境路由能力，不负责回答用户。判断当前消息是 personal、work 或 mixed，并只摘取明确与工作有关的原文片段。工作相关性不能只依赖某个关键词；要结合上下文和用户正在讨论的对象判断。用户说‘先不聊工作’‘换个话题’等是在退出工作语境，不得因为出现‘工作’二字判成 work 或 mixed；除非同一句里仍提出了明确的项目、门店、指标或经营问题。项目、门店和经营节点只能从 authorizedScopes 中选择，无法确定时返回空值。不要补写用户没有表达的事实，不要把私人情绪当作经营事实。生成通用检索意图和可能的回流标记，只返回符合 schema 的 JSON。",
+  "outputSchema": {
+    "conversationType": "personal|work|mixed",
+    "interactionIntent": "support=倾诉求陪伴而非要分析；lookup=查询事实；explore=讨论想法；delegate=明确委托产出或执行",
+    "replyToActiveTask": "boolean，仅当本句确实回应 activeTask 的工作问题；短句、晚安、调情、转话题不表示回应任务",
+    "workSegments": ["string"],
+    "scope": { "projectId": "string|null", "venueIds": ["string"] },
+    "intent": { "topics": ["string"], "metricIds": ["string"], "assetTypes": ["string"], "timeRange": "string", "question": "string" },
+    "retrievalNeeded": "boolean",
+    "writebackPotential": "boolean",
+    "confidence": "number 0..1"
+  },
+  "temperature": 0.05,
+  "maxTokens": 420
+}

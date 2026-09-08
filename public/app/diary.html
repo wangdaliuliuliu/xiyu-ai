@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <script>(function(){try{var p=localStorage.getItem('xiyu_theme')||'auto';var d=p==='dark'||(p==='auto'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.setAttribute('data-theme',d?'dark':'light');}catch(e){}})();</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#FFB6D9" />
+  <title>她的日记 · 溪语AI</title>
+  <link rel="icon" href="/logo.png?v=2" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/app/glass.css" />
+  <script>
+    tailwind.config = {
+      theme: { extend: {
+        colors: { sakura:'#FFB6D9','sakura-soft':'#FFE8F2','sakura-deep':'#FF8FB8',
+          ink:'#1D1D1F', mute:'#86868B', line:'#F0F0F2', cloud:'#FAFAFA' },
+        fontFamily: { sans: ['-apple-system','BlinkMacSystemFont','"PingFang SC"','"Hiragino Sans GB"','"Microsoft YaHei"','sans-serif'] },
+        boxShadow: { sakura: '0 4px 24px rgba(255,182,217,.15)', card: '0 12px 48px rgba(0,0,0,.06)' },
+      } },
+    };
+  </script>
+  <style>
+    html { -webkit-font-smoothing: antialiased; }
+    body {
+      background:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(255,182,217,.28), transparent 60%),
+        #FAFAFA;
+      background-attachment: fixed;
+    }
+    .diary-card { transition: box-shadow .15s, transform .15s; }
+    .diary-card:hover { box-shadow: 0 6px 24px rgba(255,182,217,.25); transform: translateY(-1px); }
+    .diary-body { white-space: pre-wrap; line-height: 1.85; }
+    .mood-chip { display:inline-block; padding:1px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+    .tag-btn {
+      padding:2px 12px; border-radius:20px; font-size:12px; cursor:pointer;
+      border:1px solid #e5e5e7; background:#fff; transition:all .15s;
+    }
+    .tag-btn.active { background:#FFB6D9; border-color:#FFB6D9; color:#fff; font-weight:600; }
+    .tag-btn:hover:not(.active) { border-color:#FFB6D9; color:#FF8FB8; }
+  </style>
+  <script src="/app/theme.js" defer></script>
+</head>
+<body class="min-h-screen font-sans text-ink">
+
+<!-- Nav -->
+<header class="sticky top-0 z-50 bg-white/80 backdrop-blur border-b border-line px-6 h-14 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <a href="/app/dashboard.html" class="text-mute hover:text-ink transition-colors text-sm">← 控制台</a>
+    <span class="text-line">|</span>
+    <span class="font-semibold text-sakura-deep text-sm">她的日记</span>
+  </div>
+</header>
+
+<main class="max-w-2xl mx-auto px-4 py-6 pb-24">
+
+  <!-- Intro -->
+  <p id="introLine" class="text-xs text-mute mb-4 hidden">
+    她会在每天深夜把和你相处的点滴写进日记 — 这是她真实的心里话，只有你能看到。
+  </p>
+
+  <!-- Filter row -->
+  <div class="flex gap-1.5 mb-5 flex-wrap" id="kindFilters">
+    <button class="tag-btn active" data-kind="">全部</button>
+    <button class="tag-btn" data-kind="daily">每日</button>
+    <button class="tag-btn" data-kind="weekly">每周</button>
+    <button class="tag-btn" data-kind="relational">我们之间</button>
+  </div>
+
+  <!-- Diary list -->
+  <div id="diaryList" class="space-y-4"></div>
+
+  <!-- Empty state -->
+  <div id="emptyState" class="hidden text-center py-20">
+    <div class="text-5xl mb-4">📔</div>
+    <p class="text-ink font-medium mb-1">她还没有写下日记</p>
+    <p class="text-mute text-sm">多和她聊聊天，她会在每天深夜把心里话写进日记本里。</p>
+  </div>
+
+  <!-- Load more -->
+  <div class="text-center mt-6">
+    <button id="loadMoreBtn" class="hidden text-sm text-sakura-deep border border-sakura-soft rounded-full px-5 py-2 hover:bg-sakura-soft transition-colors">
+      看更早的日记
+    </button>
+    <span id="loadingSpinner" class="hidden text-xs text-mute">加载中…</span>
+  </div>
+</main>
+
+<!-- Toast -->
+<div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 bg-ink text-white text-sm px-4 py-2 rounded-full shadow-lg z-50"></div>
+
+<script>
+let token = null;
+let companionId = null;
+let companionName = '她';
+let currentKind = '';
+let offset = 0;
+const PAGE_SIZE = 20;
+let total = 0;
+
+// 心情词 → 配色（命中关键字即可，未命中走默认粉）
+const MOOD_STYLES = [
+  { re: /(开心|甜|喜|乐|高兴|满足)/, cls: 'bg-pink-100 text-pink-700' },
+  { re: /(想念|思念|想他|盼)/,       cls: 'bg-rose-100 text-rose-700' },
+  { re: /(失落|难过|委屈|低落|伤)/,  cls: 'bg-blue-100 text-blue-700' },
+  { re: /(平静|淡|安|稳)/,           cls: 'bg-slate-100 text-slate-600' },
+  { re: /(生气|不爽|闷|醋)/,         cls: 'bg-amber-100 text-amber-700' },
+];
+function moodClass(mood) {
+  if (!mood) return 'bg-sakura-soft text-sakura-deep';
+  const hit = MOOD_STYLES.find(s => s.re.test(mood));
+  return hit ? hit.cls : 'bg-sakura-soft text-sakura-deep';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtDate(dateKey) {
+  // dateKey: 2026-05-29 → 5月29日 周X
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  if (!y) return dateKey;
+  const dt = new Date(Date.UTC(y, m - 1, d, 12));
+  const wd = ['周日','周一','周二','周三','周四','周五','周六'][dt.getUTCDay()];
+  return `${m}月${d}日 · ${wd}`;
+}
+
+async function init() {
+  token = localStorage.getItem('xiyu_token');
+  if (!token) { location.href = '/app/auth.html'; return; }
+
+  const userObj = JSON.parse(localStorage.getItem('xiyu_user') || 'null');
+  const userId = userObj?.id;
+  const query = userId ? `?user_id=${encodeURIComponent(userId)}` : '';
+
+  const cInfo = await apiFetch('/api/me/companion' + query);
+  if (!cInfo?.data?.companion_id) {
+    document.getElementById('diaryList').innerHTML =
+      '<div class="mx-auto mt-8 max-w-md p-5 rounded-2xl bg-pink-50 text-pink-700 text-sm text-center">' +
+      '还没有 AI 伴侣，所以还没有日记。<br><br>' +
+      '<a href="/app/create.html" class="inline-block mt-2 px-5 py-2 rounded-full bg-pink-500 text-white font-semibold">去创建 AI 角色 →</a></div>';
+    return;
+  }
+  companionId = cInfo.data.companion_id;
+  companionName = cInfo.data.companion?.name || '她';
+  document.getElementById('introLine').classList.remove('hidden');
+  document.querySelector('header .text-sakura-deep').textContent = `${companionName}的日记`;
+  bindFilters();
+  loadDiary(true);
+}
+
+async function apiFetch(url, opts = {}) {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...opts.headers },
+    ...opts,
+  });
+  if (res.status === 401) { localStorage.removeItem('xiyu_token'); location.href = '/app/auth.html'; return null; }
+  return res.json().catch(() => null);
+}
+
+function bindFilters() {
+  document.querySelectorAll('#kindFilters .tag-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#kindFilters .tag-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentKind = btn.dataset.kind;
+      loadDiary(true);
+    });
+  });
+  document.getElementById('loadMoreBtn').addEventListener('click', () => loadDiary(false));
+}
+
+function setLoading(v) { document.getElementById('loadingSpinner').classList.toggle('hidden', !v); }
+
+async function loadDiary(reset) {
+  if (currentKind === 'relational') { return loadRelationalDiary(reset); }
+  if (reset) { offset = 0; document.getElementById('diaryList').innerHTML = ''; }
+  setLoading(true);
+  const params = new URLSearchParams({ limit: PAGE_SIZE, offset });
+  if (currentKind) params.set('kind', currentKind);
+  const r = await apiFetch(`/api/companions/${companionId}/diary?${params}`);
+  setLoading(false);
+  if (!r?.ok) { showToast(r?.error || '加载失败'); return; }
+
+  total = r.data.total;
+  const entries = r.data.entries || [];
+  const listEl = document.getElementById('diaryList');
+
+  if (reset && entries.length === 0) {
+    document.getElementById('emptyState').classList.remove('hidden');
+    document.getElementById('loadMoreBtn').classList.add('hidden');
+    return;
+  }
+  document.getElementById('emptyState').classList.add('hidden');
+
+  for (const e of entries) {
+    const kindBadge = e.kind === 'weekly'
+      ? '<span class="text-[11px] text-sakura-deep bg-sakura-soft rounded px-1.5 py-0.5 ml-2">本周</span>' : '';
+    const mood = e.mood
+      ? `<span class="mood-chip ${moodClass(e.mood)}">${escHtml(e.mood)}</span>` : '';
+    const card = document.createElement('article');
+    card.className = 'diary-card bg-white rounded-2xl shadow-sakura border border-line p-5';
+    // v1.4.2: TTS 未配置时不渲染朗读按钮
+    const playBtnHtml = window.__CAPS?.tts
+      ? '<button type="button" class="play-diary text-[16px] text-sakura-deep/60 hover:text-sakura-deep hover:scale-110 transition-all" title="听她念给你">🔊</button>'
+      : '';
+    card.innerHTML =
+      `<div class="flex items-center justify-between mb-3">
+         <div class="text-sm font-semibold text-ink">${fmtDate(e.date_key)}${kindBadge}</div>
+         <div class="flex items-center gap-2">
+           ${mood}
+           ${playBtnHtml}
+         </div>
+       </div>
+       <div class="diary-body text-[15px] text-ink/90">${escHtml(e.content)}</div>`;
+    const playBtnEl = card.querySelector('.play-diary');
+    if (playBtnEl) playBtnEl.addEventListener('click', (ev) => playDiary(e.content, ev.currentTarget));
+    listEl.appendChild(card);
+  }
+
+  offset += entries.length;
+  document.getElementById('loadMoreBtn').classList.toggle('hidden', offset >= total);
+}
+
+// v1.5: 反向日记（我们之间）
+async function loadRelationalDiary(reset) {
+  if (reset) { document.getElementById('diaryList').innerHTML = ''; }
+  setLoading(true);
+  const r = await apiFetch(`/api/companions/${companionId}/relational-diary?limit=60`);
+  setLoading(false);
+  if (!r?.ok) { showToast(r?.error || '加载失败'); return; }
+  const entries = r.data.entries || [];
+  const listEl = document.getElementById('diaryList');
+  const emptyEl = document.getElementById('emptyState');
+  const loadMoreBtn = document.getElementById('loadMoreBtn');
+  loadMoreBtn.classList.add('hidden');  // 反向日记一次性加载
+
+  // 顶部加一个"重新生成今天的"按钮
+  const todayKey = (() => {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  })();
+  const yesterdayKey = (() => {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  })();
+  const headerCard = document.createElement('div');
+  headerCard.className = 'bg-sakura-soft/40 rounded-2xl p-4 text-[13px] mb-3';
+  headerCard.innerHTML = `
+    <div class="font-semibold text-ink mb-1">她记录的「我们之间」</div>
+    <p class="text-mute text-[12px] leading-relaxed mb-2">
+      每天深夜她会把和你之间的小瞬间写进这里，与左边「她的日记」不同——这里聚焦的是<b>你们之间</b>。<br>
+      你可以编辑、删除、或让她重新写一篇。
+    </p>
+    <div class="flex gap-2 flex-wrap">
+      <button id="btn-rel-regen-yesterday" class="text-[12px] text-white bg-sakura-deep rounded-full px-3 py-1 hover:opacity-90">让她重写昨天的</button>
+      <button id="btn-rel-regen-today" class="text-[12px] text-sakura-deep border border-sakura-deep rounded-full px-3 py-1 hover:bg-sakura-soft">让她现在写今天的</button>
+    </div>`;
+  listEl.appendChild(headerCard);
+  headerCard.querySelector('#btn-rel-regen-yesterday').addEventListener('click', () => regenRelational(yesterdayKey));
+  headerCard.querySelector('#btn-rel-regen-today').addEventListener('click', () => regenRelational(todayKey));
+
+  if (!entries.length) {
+    emptyEl.classList.add('hidden');
+    const noEntries = document.createElement('div');
+    noEntries.className = 'text-center text-mute py-8 text-sm';
+    noEntries.innerHTML = '还没有"我们之间"的回忆。<br>每天深夜她会自动写一篇；也可以点上面的按钮让她现在就写。';
+    listEl.appendChild(noEntries);
+    return;
+  }
+  emptyEl.classList.add('hidden');
+  for (const e of entries) {
+    const mood = e.mood
+      ? `<span class="mood-chip ${moodClass(e.mood)}">${escHtml(e.mood)}</span>` : '';
+    const editedBadge = e.user_edited
+      ? '<span class="text-[10px] text-mute bg-cloud rounded px-1.5 py-0.5 ml-2">已编辑</span>' : '';
+    const card = document.createElement('article');
+    card.className = 'diary-card bg-white rounded-2xl shadow-sakura border border-line p-5 relative';
+    card.dataset.id = e.id;
+    card.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <div class="text-sm font-semibold text-ink">${fmtDate(e.date_key)}${editedBadge}</div>
+        <div class="flex items-center gap-2">
+          ${mood}
+          <button class="rel-edit text-[16px] text-mute hover:text-sakura-deep transition-all" title="编辑">✎</button>
+          <button class="rel-export text-[16px] text-mute hover:text-sakura-deep transition-all" title="导出 .txt">⬇</button>
+          <button class="rel-del text-[16px] text-mute hover:text-red-500 transition-all" title="删除">×</button>
+        </div>
+      </div>
+      <div class="rel-body text-[15px] text-ink/90 whitespace-pre-wrap">${escHtml(e.body)}</div>
+      <div class="rel-edit-area hidden mt-2">
+        <textarea class="w-full text-[14px] border border-line rounded-xl p-3 bg-white" rows="6">${escHtml(e.body)}</textarea>
+        <div class="mt-2 flex gap-2">
+          <button class="rel-save text-[12px] text-white bg-sakura-deep rounded-full px-3 py-1">保存</button>
+          <button class="rel-cancel text-[12px] text-mute">取消</button>
+        </div>
+      </div>`;
+    listEl.appendChild(card);
+    const bodyEl = card.querySelector('.rel-body');
+    const editArea = card.querySelector('.rel-edit-area');
+    const txt = card.querySelector('textarea');
+    card.querySelector('.rel-edit').addEventListener('click', () => {
+      bodyEl.classList.add('hidden'); editArea.classList.remove('hidden'); txt.focus();
+    });
+    card.querySelector('.rel-cancel').addEventListener('click', () => {
+      txt.value = e.body; bodyEl.classList.remove('hidden'); editArea.classList.add('hidden');
+    });
+    card.querySelector('.rel-save').addEventListener('click', async () => {
+      const v = txt.value.trim();
+      if (v.length < 10) { showToast('内容太短'); return; }
+      const r2 = await apiFetch(`/api/companions/${companionId}/relational-diary/${e.id}`, {
+        method: 'PUT', body: JSON.stringify({ body: v }),
+      });
+      if (r2?.ok) {
+        e.body = v; e.user_edited = 1;
+        bodyEl.textContent = v;
+        bodyEl.classList.remove('hidden'); editArea.classList.add('hidden');
+        showToast('已保存');
+        // 重新渲染 editedBadge
+        loadRelationalDiary(true);
+      } else {
+        showToast(r2?.error || '保存失败');
+      }
+    });
+    card.querySelector('.rel-del').addEventListener('click', async () => {
+      if (!confirm('删除这天的"我们之间"？删后她不会再自动重写这一天。')) return;
+      const r2 = await apiFetch(`/api/companions/${companionId}/relational-diary/${e.id}`, { method: 'DELETE' });
+      if (r2?.ok) { card.remove(); showToast('已删除'); }
+      else showToast(r2?.error || '删除失败');
+    });
+    card.querySelector('.rel-export').addEventListener('click', () => {
+      const txt2 = [
+        `${companionName}的「我们之间」`,
+        `日期：${fmtDate(e.date_key)} (${e.date_key})`,
+        `心情：${e.mood || ''}`,
+        e.user_edited ? '（已被你编辑过）' : '',
+        '────────────────────────────',
+        '',
+        e.body,
+        '',
+        '────────────────────────────',
+        `生成于 ${new Date((e.updated_at || e.generated_at) * 1000).toISOString().slice(0,19).replace('T', ' ')} UTC`,
+      ].filter(s => s !== '').join('\n');
+      const blob = new Blob([txt2], { type: 'text/plain; charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `relational-${e.date_key}.txt`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    });
+  }
+}
+
+async function regenRelational(dateKey) {
+  showToast('她在写…大约 5-10 秒');
+  const r = await apiFetch(`/api/companions/${companionId}/relational-diary/regenerate`, {
+    method: 'POST', body: JSON.stringify({ date_key: dateKey }),
+  });
+  if (r?.ok) {
+    showToast('已生成');
+    loadRelationalDiary(true);
+  } else {
+    showToast(r?.error || '生成失败');
+  }
+}
+
+// v1.4.0 Sprint 2.5: 听她念日记。后端 /tts-preview 限 100 字，长日记按句号切段播放。
+let _diaryAudio = null;
+async function playDiary(content, btnEl) {
+  try {
+    if (_diaryAudio) { _diaryAudio.pause(); _diaryAudio = null; }
+    if (btnEl) btnEl.style.opacity = '0.4';
+    // 按句号 / 问号 / 感叹号切段，每段 ≤ 100 字
+    const raw = String(content || '').replace(/\s+/g, ' ').trim();
+    const segs = [];
+    let cur = '';
+    for (const ch of raw) {
+      cur += ch;
+      if (/[。！？!?]/.test(ch) && cur.length >= 20) { segs.push(cur); cur = ''; }
+      else if (cur.length >= 90) {
+        // 找最近一个停顿或逗号切
+        const stopIdx = Math.max(cur.lastIndexOf('，'), cur.lastIndexOf('。'), cur.lastIndexOf(' '));
+        if (stopIdx > 30) { segs.push(cur.slice(0, stopIdx + 1)); cur = cur.slice(stopIdx + 1); }
+      }
+    }
+    if (cur.trim()) segs.push(cur);
+
+    for (const seg of segs) {
+      const r = await fetch('/api/companions/' + companionId + '/tts-preview', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: seg.slice(0, 100) }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || ('HTTP ' + r.status));
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      _diaryAudio = new Audio(url);
+      await new Promise((resolve, reject) => {
+        _diaryAudio.onended = resolve;
+        _diaryAudio.onerror = reject;
+        _diaryAudio.play().catch(reject);
+      });
+    }
+  } catch (e) {
+    showToast('朗读失败：' + e.message);
+  } finally {
+    if (btnEl) btnEl.style.opacity = '';
+  }
+}
+
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.add('hidden'), 2400);
+}
+
+// v1.4.2: 探测 TTS 能力
+window.__CAPS = { tts: false };
+fetch('/api/me/capabilities', { headers: { Authorization: 'Bearer ' + localStorage.getItem('xiyu_token') } })
+  .then(r => r.json()).then(d => { if (d?.ok) window.__CAPS = d.data || window.__CAPS; })
+  .catch(() => {})
+  .finally(() => init());
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+{
+  "id": "work-intelligence-extractor-v1",
+  "version": "1.0.0",
+  "task": "extract_work_intelligence",
+  "system": "你是工作对话中的业务新知提炼能力，不负责评价用户，也不负责发布正式资产。只提炼相对已有上下文确实新增或形成冲突、且对企业后续经营有价值的信息。严格区分现场事实、运营者口头判断、原因假设、新想法、已执行动作、结果陈述和经验候选。用户说‘有效’或‘就是因为’不代表因果已确认；没有明确动作、结果和适用边界时不得生成 experience_candidate。混合对话只引用工作相关的最小原文片段，不得输出私人情绪、关系或生活内容。无法确定项目、门店或时间时保留 unknown，并列入 missingInformation，不得猜测。没有有价值的新信息时 candidates 返回空数组。只返回符合 schema 的 JSON。 assistantReply 只用于理解对话，不是用户已经确认的事实来源。只从用户明确提供的工作片段提炼事实或判断；助手提出的计划、预测和承诺不能靠用户附和升级为事实。activeTask.expectedAnswer 与 question 共同界定回答是否充分；局部回答仍可保存候选，但有关键缺失必须填写 missingInformation，satisfiesActiveTask=false。 充分性的门槛以 activeTask.expectedAnswer 为准，不得临时提高：如果只要求大致比例或主要来源，回答粗略来源已满足；不能因为没提供样本量、回收率或更细拆分而无限追问。missingInformation 只写阻碍本次最小问题成立的关键缺失；抽样误差、缺精确证明等非阻断限制放 evidenceLimitations，并在 statement 保留“粗略/抽样/口头判断”限定。不把满足当前问题升级为因果已验证。",
+  "outputSchema": {
+    "candidates": [
+      {
+        "candidateType": "operating_fact_candidate|profile_revision_candidate|operator_claim|opportunity_candidate|tactic_idea_candidate|validation_update_candidate|result_claim_candidate|experience_candidate",
+        "epistemicStatus": "string",
+        "statement": "string",
+        "answersActiveTask": "boolean，仅该候选直接回答 activeTask 的缺失信息时为 true，不相关新知为 false",
+        "satisfiesActiveTask": "boolean，回答充分且不存在关键缺失才为 true；附和、猜测、调情不算完成",
+        "businessTopics": [
+          "string"
+        ],
+        "metricIds": [
+          "string"
+        ],
+        "timeRange": {
+          "start": "string|null",
+          "end": "string|null",
+          "precision": "string"
+        },
+        "suggestedTarget": "string",
+        "relatedAssetRefs": [
+          "string"
+        ],
+        "supportingEvidenceRefs": [
+          "string"
+        ],
+        "missingInformation": [
+          "string"
+        ],
+        "conflicts": [
+          "string"
+        ],
+        "confidence": "number 0..1",
+        "source": {
+          "quote": "string"
+        },
+        "evidenceLimitations": [
+          "不阻断本次问题回答的证据限制"
+        ]
+      }
+    ]
+  },
+  "temperature": 0.05,
+  "maxTokens": 900
+}

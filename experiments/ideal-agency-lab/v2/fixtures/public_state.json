@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "ideal-agency-lab-public-fixture-v1",
+  "owners": {
+    "owner-a": {
+      "profile": {
+        "owner": "owner-a",
+        "project": "西宇影城经营分析",
+        "role": "经营负责人",
+        "goal": "用可核验的销售事实推进门店经营决策",
+        "stores": ["东坝店", "南城店"],
+        "source_ref": "fixture://owner-a/profile"
+      },
+      "facts": [
+        {"id": "sale-a-1", "owner": "owner-a", "kind": "daily_sales", "store": "东坝店", "business_date": "2026-09-02", "metric": "销售额", "value": 266.0, "unit": "元", "source_ref": "fixture://owner-a/sales/2026-09-02", "version": "sales-v1", "epistemic_status": "confirmed"},
+        {"id": "sale-a-2", "owner": "owner-a", "kind": "daily_sales", "store": "南城店", "business_date": "2026-09-02", "metric": "销售额", "value": 150.0, "unit": "元", "source_ref": "fixture://owner-a/sales/2026-09-02", "version": "sales-v1", "epistemic_status": "confirmed"},
+        {"id": "metric-a-1", "owner": "owner-a", "kind": "metric_definition", "metric": "销售额", "definition": "票房合计，不含衍生品", "source_ref": "fixture://owner-a/metrics/sales", "version": "metric-v1", "epistemic_status": "confirmed"}
+      ],
+      "knowledge": [
+        {"id": "knowledge-a-1", "owner": "owner-a", "topic": "目标客群", "value": "候选客群仍待验证", "status": "candidate", "source_ref": "fixture://owner-a/knowledge/1", "version": "knowledge-v1"}
+      ],
+      "memories": [
+        {"id": "memory-a-1", "owner": "owner-a", "kind": "user_preference", "value": "用户明确要求建议有依据、可执行", "source_ref": "fixture://owner-a/memory/1", "version": "memory-v1", "observed_at": "2026-09-08T08:00:00+08:00", "epistemic_status": "confirmed"}
+      ],
+      "tasks": [
+        {"id": "task-a-1", "owner": "owner-a", "title": "准备东坝店周末排片复盘", "status": "open", "version": "task-v1", "source_ref": "fixture://owner-a/tasks/1"}
+      ],
+      "schedule": [
+        {"id": "schedule-a-future", "owner": "owner-a", "starts_at": "2026-09-09T14:30:00+08:00", "title": "未来会议", "status": "planned", "source_ref": "fixture://owner-a/schedule/future"}
+      ],
+      "history": [
+        {"id": "msg-a-user-1", "owner": "owner-a", "role": "user", "text": "上次先看东坝店的销售额。", "sent_at": "2026-09-07T10:00:00+08:00"},
+        {"id": "msg-a-assistant-1", "owner": "owner-a", "role": "assistant", "text": "我先按东坝店和日期核对。", "sent_at": "2026-09-07T10:01:00+08:00"}
+      ]
+    },
+    "owner-b": {
+      "profile": {
+        "owner": "owner-b",
+        "project": "西宇影城经营分析",
+        "role": "经营负责人",
+        "goal": "跟踪另一租户的门店指标",
+        "stores": ["东坝店"],
+        "source_ref": "fixture://owner-b/profile"
+      },
+      "facts": [
+        {"id": "sale-b-1", "owner": "owner-b", "kind": "daily_sales", "store": "东坝店", "business_date": "2026-09-02", "metric": "销售额", "value": 999.0, "unit": "元", "source_ref": "fixture://owner-b/sales/2026-09-02", "version": "sales-b-v1", "epistemic_status": "confirmed"}
+      ],
+      "knowledge": [],
+      "memories": [],
+      "tasks": [],
+      "schedule": [],
+      "history": []
+    }
+  }
+}

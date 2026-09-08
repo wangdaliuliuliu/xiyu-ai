@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true   # check:release 的 tag↔package.json 对账需要 tags
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # photo_aspect_smoke 的转码卡口走真实 ImageMagick convert（与生产同链路）
+      - name: 安装 ImageMagick
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
+
+      - name: 语法检查 (node --check 全 src + scripts)
+        run: find src scripts -name '*.mjs' -exec node --check {} \;
+
+      # v1.21.2 (#263 事故后续)：no-const-assign 等运行时 TypeError 级问题在 CI 抓死。
+      # 红色验证过：对 v1.20.1 坏版本跑能精确报出 'systemPrompt' is constant。
+      - name: ESLint（真 bug 级规则，零风格审美）
+        run: npm run lint
+
+      - name: import 链 smoke
+        run: npm run check:imports
+
+      - name: 字段漂移检查
+        run: npm run check:field-drift
+
+      - name: 发布一致性（版本号↔tag↔README↔ROADMAP↔双语行数）
+        run: npm run check:release
+
+      - name: neglect / 依恋 / reunion smoke
+        run: node scripts/neglect_stage_smoke.mjs
+
+      - name: 共建独特性 shaping smoke
+        run: node scripts/shaping_smoke.mjs
+
+      - name: 初恋特质 smoke
+        run: node scripts/first_love_smoke.mjs
+
+      - name: 人设导出字段对账（防白名单漂移）
+        run: node scripts/persona_export_drift_check.mjs
+
+      - name: 照片链路 issue#237 三连修复回归
+        run: node scripts/photo_fix237_smoke.mjs
+
+      - name: morning 重复早安修复回归
+        run: node scripts/morning_dedup_smoke.mjs
+
+      - name: 主动消息同义复读防护回归
+        run: node scripts/proactive_dedup_smoke.mjs
+
+      - name: 语义/intent 级复读止血（PR-1：intent 分类/冷却/ack 闸·守住早安续命器·u48 真实序列红验）
+        run: node scripts/intent_dedup_smoke.mjs
+
+      - name: 情绪机 1000 轮压测 + fuzzing
+        run: node scripts/emotion_stress_test.mjs
+
+      - name: 危机干预 safety 护栏
+        run: node scripts/safety_smoke.mjs
+
+      - name: 未成年人保护 minor guard 护栏
+        run: node scripts/minor_guard_smoke.mjs
+
+      - name: 隐私过滤 privacy filter 护栏
+        run: node scripts/privacy_filter_guard.mjs
+
+      - name: 冲突与和好弧 状态机转移表
+        run: node scripts/conflict_arc_smoke.mjs
+
+      - name: 冲突与和好弧 落库链 e2e
+        run: node scripts/conflict_arc_e2e.mjs
+
+      - name: 冲突红线护栏 + 危机覆盖
+        run: node scripts/conflict_redline_guard.mjs
+
+      - name: 凭空身体事件出站闸（#317 四档·v1.22 PR-L1：severe 无条件/diagnosed 查档案/symptom 放行）
+        run: node scripts/fabricated_illness_smoke.mjs
+
+      - name: life_state 引擎+生理期门控（v1.22 PR-L1 引擎/tick + PR-L2 三道门控：防同步/披露/成年）
+        run: node scripts/life_state_smoke.mjs
+
+      - name: life_state 情绪路由+PMS shadow（v1.22 PR-L3：bodyLowEnergy 让位/patTone 不写回/shadow 红线A·B·C/合成上限）
+        run: node scripts/life_state_emotion_smoke.mjs
+
+      - name: proactive 死人开关心跳
+        run: node scripts/proactive_deadman_smoke.mjs
+
+      - name: 死人开关告警出口（v1.21.6 接线：返回 message-id/从 env 取址/空收件人显式 WARN）
+        run: node scripts/deadman_alert_smoke.mjs
+
+      - name: 照片比例（机位路由 + 转码卡口）
+        run: node scripts/photo_aspect_smoke.mjs
+
+      - name: 照片无脸闸走权威 shotMode（接线第六案：ACTIVITY_POV/SCENERY 确定性无脸·不靠文本嗅探·LLM 漂移也兜住）
+        run: node scripts/photo_noface_gate_smoke.mjs
+
+      - name: proactive 素材级去重（冷却/归因/作用域钉死）
+        run: node scripts/proactive_material_smoke.mjs
+
+      - name: 称呼泄漏（"用户"零残留 + 写入端护栏）
+        run: node scripts/user_wording_guard.mjs
+
+      - name: 互动历史回填自动化（决策表/水位/防重）
+        run: node scripts/backfill_auto_smoke.mjs
+
+      - name: 入站去重（#279 上下文去重 + 协议重推，双向红色验证）
+        run: node scripts/inbound_dedup_smoke.mjs
+
+      - name: 表情冒充照片护栏（#281 双向红色验证）
+        run: node scripts/photo_impersonation_smoke.mjs
+
+      - name: 标注语料工具（CRUD/导出/admin 鉴权）
+        run: node scripts/annotation_smoke.mjs
+
+      - name: 照片承诺生命周期（PR-B 可行性闸门/超时兜底/改期履约）
+        run: node scripts/photo_promise_smoke.mjs
+
+      - name: 月相锚定（PR-C 纯数学/物理锚点/红色验证）
+        run: node scripts/moon_phase_smoke.mjs
+
+      - name: 照片 planner prompt 字符串（v1.21.6 P0 静默断图回归锁）
+        run: node scripts/photo_planner_prompt_smoke.mjs
+
+      - name: digest 错误扫描范围（v1.21.6 报警盲区：高信号 [WARN] 升格 + 噪声不灌）
+        run: node scripts/digest_error_scan_smoke.mjs
+
+      - name: 照片品类加权采样（v1.21.6 PR-A 配置基建/默认关/weeklyCap/fail-open）
+        run: node scripts/photo_categories_smoke.mjs
+
+      - name: 想到你品类素材选择（v1.21.6 PR-B 指向正确/雷区·隐私零选用/14天冷却）
+        run: node scripts/photo_thought_smoke.mjs
+
+      - name: 日出日落纯数学（v1.21.6 PR-C 晚霞窗口/物理合理性/注入红验）
+        run: node scripts/sun_times_smoke.mjs
+
+      - name: reality facts 真实世界事实层（v1.21.4 PR-W3 节气/农历天文计算+注入纪律不编造）
+        run: node scripts/reality_facts_smoke.mjs
+
+      - name: 照片锚定与护栏注入（v1.21.6 PR-C 封面/天气/日落/互拍/candid）
+        run: node scripts/photo_anchor_smoke.mjs
+
+      - name: current_works 真实性验证双闸（v1.21.4 PR-W1 红验①②③ + 虚构书拦截）
+        run: node scripts/current_works_smoke.mjs
+
+      - name: current_works 表达层（v1.21.4 PR-W2 注入排序/冷却放行双向/存量退场/归档）
+        run: node scripts/current_works_expression_smoke.mjs
+
+      - name: current_works 日程结构化（v1.21.4 PR-W5 日程消费档案/progress 渐进/life_state 预留）
+        run: node scripts/works_schedule_smoke.mjs
+
+      - name: proactive digest 旁路素材冷却闸门（接线类第五案：mem:509 复读修+双向红验）
+        run: node scripts/proactive_digest_cooldown_smoke.mjs
+
+      - name: 头像反恐怖谷（2026-06-13 删四 doll-face 触发词+真实肤质单一来源/塑料黑名单自检）
+        run: node scripts/avatar_prompt_smoke.mjs
+
+      - name: 记忆 chip↔layer 双向对账（2026-06-12 删死枚举 chip 后防空抽屉/防有数据无窗口）
+        run: node scripts/memory_chip_parity_smoke.mjs
+
+      - name: reflection 批产出心跳 emit↔parse 契约（2026-06-12 防"永远无心跳"假警报漂移）
+        run: node scripts/reflection_heartbeat_smoke.mjs
+
+      - name: saveMemory 契约对齐 + layer→type 边界映射（2026-06-12 A 纯加法/B 映射不到必 reject）
+        run: node scripts/reflection_memory_mapping_smoke.mjs
+
+      - name: 场景状态持久化（#324 失忆修：current_scene 事件驱动持久 + 约定注入 + TTL 清场）
+        run: node scripts/scene_state_smoke.mjs
+
+      - name: proactive 三桶心跳 emit↔parse 契约（2026-06-13 deadman 信号分离·防"永远无心跳"漂移）
+        run: node scripts/proactive_heartbeat_smoke.mjs
+
+      - name: digest 轮转感知日志读取（2026-06-14 B 修·集成红验：跨 bot.log/.1/.gz + 窗口过滤 + reject 分级）
+        run: node scripts/digest_log_rotation_smoke.mjs
+
+      - name: playground 对外通道每日探针（2026-06-13 #310 系统解：接线必叫/provider 软处理/零污染）
+        run: node scripts/playground_probe_smoke.mjs
+
+      - name: 真实留存看板口径（PR-0：synthetic 切分/留存窗口/proactive 判定/复读检出·防北极星仪表口径漂移）
+        run: node scripts/retention_board_smoke.mjs
+
+# 注：check:p0 / smoke(release_smoke_test.sh) 含 HTTP 探测，需服务在 :3000，
+# 暂未进门禁（在 CI 无服务会红）。后续给它们加 SKIP_HTTP 模式再接入。

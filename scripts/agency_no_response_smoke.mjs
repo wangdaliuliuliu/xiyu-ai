@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xiyu-agency-no-response-'));
+process.env.DB_PATH = path.join(root, 'bot.db');
+const dbmod = await import('../src/db.mjs');
+const { getDb, createAgencyIntention, createAgencyAction, updateAgencyAction, commitAgencyReceipt, getAgencyIntention, listAgencyFeedback } = dbmod;
+const { runAgencyCycle } = await import('../src/proactive.mjs');
+const db = getDb();
+const companion = db.prepare('INSERT INTO companions (user_id, bot_id, name) VALUES (NULL, ?, ?)').run('no-response-bot', '无回应角色');
+const companionId = Number(companion.lastInsertRowid);
+const intention = createAgencyIntention({ accountId: 1, companionId, domain: 'work', desiredChange: '等待用户确认口径', appraisalSummary: '已提出一个低负担问题', basisRefs: ['traffic:scope'], semanticKey: 'no-response:test', state: 'ready' });
+const action = createAgencyAction({ intentionId: intention.id, accountId: 1, companionId, actionType: 'contact_text', strategySummary: '先给价值再问一个问题', needsUserInput: true, dedupKey: 'no-response-action', expiresAt: '2026-09-08T09:00:00.000Z', state: 'planned' });
+const sending = updateAgencyAction(action.id, { accountId: 1, companionId, expectedVersion: action.version, state: 'sending' });
+const receipt = commitAgencyReceipt({ accountId: 1, companionId, intentionId: intention.id, actionId: action.id, intentionVersion: intention.version, actionVersion: sending.version, receipt: { state: 'delivered', providerMessageIds: ['fixture-no-response'], resultRefs: [{ kind: 'text', delivered: true }] } });
+assert.equal(receipt.status, 'committed');
+assert.equal(receipt.action.state, 'delivered');
+const result = await runAgencyCycle({ accountId: 1, companionId, mode: 'shadow', deps: { now: '2026-09-08T10:00:00.000Z', extractStructuredInfoDetailed: async () => ({ ok: true, text: JSON.stringify({ shouldAct: false, domain: 'work', desiredChange: '等待用户回应', appraisalSummary: '暂无新证据', basisRefs: ['fixture:no-response'], priorityClass: 'normal', confidence: 0.8, needsUserInput: true, reconsiderAfterMinutes: 30, reason: '等待用户回应' }), usage: {}, provider: 'fixture', model: 'fixture', attempts: 1, fallback: false }) } });
+assert.equal(result.status, 'no_opportunity');
+assert.equal(getAgencyIntention(intention.id, { accountId: 1, companionId }).state, 'waiting_user');
+assert.equal(listAgencyFeedback({ accountId: 1, companionId, intentionId: intention.id }).some(item => item.kind === 'no_response_observed'), true);
+console.log(JSON.stringify({ status: 'passed', result: result.status, intentionId: intention.id, actionId: action.id, root }));

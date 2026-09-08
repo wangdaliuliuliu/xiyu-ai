@@ -1,0 +1,32 @@
+{
+  "version": "daily-operating-schema-v1",
+  "dailyBrief": {
+    "status": "attention|normal|watch",
+    "headline": "string",
+    "summary": "string",
+    "decisionImpact": "string",
+    "evidenceRefs": ["string"],
+    "confirmedFacts": ["string"],
+    "hypotheses": ["string"],
+    "counterEvidence": ["string"],
+    "unknowns": ["string"],
+    "questionForOperator": "string"
+  },
+  "idea": {
+    "ideas": [
+      {
+        "ideaId": "string",
+        "issueId": "string",
+        "title": "string",
+        "summary": "string",
+        "ideaLevel": "immediate|adjacent|reconstruction",
+        "grounding": "grounded|inferred|speculative",
+        "whyItMayFit": ["string"],
+        "evidenceRefs": ["string"],
+        "keyAssumptions": ["string"],
+        "potentialMechanism": "string",
+        "cheapestNextExploration": "string"
+      }
+    ]
+  }
+}

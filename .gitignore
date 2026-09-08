@@ -1,0 +1,111 @@
+# 敏感配置
+.env
+.env.local
+.env.*.local
+.auth-secret
+.admin-secret
+.admin-credentials
+.weixin-credentials.json
+*.secret
+
+# 运行时数据
+data/
+logs/
+# v1.9.1: ai_taste_scan 输出含敏感对话内容
+reports/
+*.db
+*.db-wal
+*.db-shm
+
+# 用户上传内容
+public/avatars/*
+!public/avatars/preset/
+!public/avatars/.gitkeep
+public/assets/scenes/
+
+# 依赖
+node_modules/
+package-lock.json.bak
+
+# 系统
+.DS_Store
+Thumbs.db
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+
+# 备份
+_backup_*
+backups/
+*.tar.gz
+
+# ─── explicit sensitive runtime data ────────────────────────────────────────
+data/bot.db*
+data/user_memories/
+data/uploads/
+data/*.sqlite
+data/*.sqlite3
+
+# ─── production / private backup archives ──────────────────────────────────
+_backup_billing_v1/
+*.tar
+*.zip
+
+# ─── generated private media ───────────────────────────────────────────────
+public/avatars/scenes/
+public/assets/scenes/
+public/uploads/
+public/generated/
+
+# ─── local WeChat / iLink credentials (kept here for visibility) ───────────
+# (also covered by line 8 above)
+.weixin-credentials.json
+
+# ─── provider pricing config (private) ──────────────────────────────────────
+config/provider_pricing.json
+__pycache__/
+scripts/_ab_out/
+
+# v1.21.4: 标注语料导出（含用户对话原文，绝不进 git）
+data/exports/
+**/exports/*.jsonl
+
+# ─── combined workbench: local credentials, business data and generated QA ──
+workbench/backend/.env
+workbench/backend/.e2e-feishu-snapshot-*.json
+workbench/data/feishu-target.json
+workbench/data/strategy-project-profile.json
+workbench/data/weekly-ops-settings.json
+workbench/data/online-bootstrap-v1.json
+workbench/data/runtime-state/
+workbench/data/*.log
+workbench/artifacts/
+workbench/index.before-*.html
+workbench/qa/**/*.png
+workbench/backend/*.before-*.mjs
+workbench/backend/*.before-*.json
+workbench/docs/validation/
+
+# ─── local/private audit records and generated image evaluations ────────────
+docs/HANDOFF.md
+docs/PHOTO_CATEGORIES.md
+docs/validation/
+docs/agency-conformance-audit-2026-09-08.md
+docs/agency-implementation-log-2026-09-08.md
+docs/agency-v2-implementation-log-2026-09-08.md
+docs/enterprise-proactive-development-handoff-2026-09-07.md
+docs/assets/*.png
+scripts/_historical_selfie_eval/
+scripts/_route_api_out/
+scripts/_selfie_viewpoint_out/
+
+# Keep non-sensitive workbench contracts and public examples.
+!workbench/data/
+!workbench/data/field-mapping.json
+!workbench/data/idea-lenses-v1.json
+!workbench/data/xiyu-enterprise-access.example.json
+!workbench/data/feishu-target.example.json

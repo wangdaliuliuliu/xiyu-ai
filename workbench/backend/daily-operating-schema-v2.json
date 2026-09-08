@@ -1,0 +1,43 @@
+{
+  "version": "daily-operating-schema-v2",
+  "dailyBrief": {
+    "status": "attention|normal|watch|no_data",
+    "briefType": "signal|monitor|data_gap|watch",
+    "dataAvailable": "boolean",
+    "actionable": "boolean",
+    "canFeedback": "boolean",
+    "headline": "string",
+    "summary": "string",
+    "decisionImpact": "string",
+    "evidenceRefs": ["string"],
+    "confirmedFacts": ["string"],
+    "hypotheses": ["string"],
+    "counterEvidence": ["string"],
+    "unknowns": ["string"],
+    "questionForOperator": "string"
+  },
+  "idea": {
+    "ideas": [
+      {
+        "ideaId": "string",
+        "issueId": "string",
+        "hook": "12到36个汉字的自然开场，不使用报告口吻",
+        "title": "具体、鲜明、可以想象出场景的标题",
+        "pitch": "用2到4句话讲清楚这个主意落在门店里是什么样子",
+        "planSteps": ["具体步骤1", "具体步骤2", "具体步骤3"],
+        "ideaLevel": "immediate|adjacent|reconstruction",
+        "grounding": "grounded|inferred|speculative",
+        "whyItMayFit": ["为什么可能适合当前门店"],
+        "evidenceRefs": ["string"],
+        "keyAssumptions": ["string"],
+        "problemScope": "这个主意解决的具体问题范围",
+        "causalHypothesis": "它认为问题为什么发生",
+        "solutionMechanism": "通过什么机制改变结果",
+        "targetAudience": "主要作用对象",
+        "substantiveDelta": "若与历史主意相近，本次新增的证据、机制或执行步骤；否则留空",
+        "potentialMechanism": "string",
+        "cheapestNextExploration": "string"
+      }
+    ]
+  }
+}

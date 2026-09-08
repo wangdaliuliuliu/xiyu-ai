@@ -1,0 +1,125 @@
+{
+  "version": "operating-strategy-workbench-v5",
+  "sourceOwnership": {
+    "operatingFacts": "yuanqu_weekly_ops_records_v1 and Feishu fact tables",
+    "periodicReview": "yuanqu_weekly_ops_reports_v1",
+    "longLivedStrategyState": "yuanqu_operating_strategy_workbench_v1"
+  },
+  "rules": [
+    "The workbench stores references and strategy state, not copies of operating facts.",
+    "Calculated metrics, data coverage and health status refresh without a model call.",
+    "Node interpretation is on-demand and cached by source fingerprint, prompt version and knowledge version.",
+    "Rule thresholds create candidate signals only; they never become final problems or opportunities before expert review.",
+    "Every expert signal references immutable evidence ids and declares comparison basis, confidence and missing facts.",
+    "Unconfirmed cause lowers confidence but does not block metric-linked solution exploration or small tests.",
+    "A solution is hard-blocked only when the target metric cannot be computed, its definition is unclear, or the tactic cannot bind to an observable metric.",
+    "Long-term opportunities persist across periods and only update evidence, priority or status.",
+    "Tactics persist independently from weekly data; validation results update their status.",
+    "Finalized weekly conclusions and accepted experiences are reusable knowledge sources.",
+    "Solution directions are retrieved from stable levers; tactics are retrieved from the versioned knowledge catalog before AI ranking.",
+    "A tactic plan is not an experience until an execution result is validated and its boundary is confirmed."
+  ],
+  "goal": {
+    "id": "stable goal id",
+    "scope": "project or venue scope",
+    "metricRefs": "metric ids",
+    "target": "target value or statement",
+    "timeRange": "effective start and end",
+    "priority": "low, normal or high",
+    "status": "active, achieved, paused or archived",
+    "sourceRefs": "references supporting the goal"
+  },
+  "decision": {
+    "id": "stable decision id",
+    "scope": "project or venue scope",
+    "decision": "what was decided",
+    "reason": "why it was decided",
+    "basedOnRefs": "facts, evidence or goals used",
+    "rejectedAlternatives": "alternatives considered and rejected",
+    "decidedAt": "ISO time",
+    "status": "active, superseded or archived"
+  },
+  "enterpriseCognitionRecord": {
+    "version": "enterprise-cognition-record-v1",
+    "objects": ["project", "venue", "metric", "goal", "decision", "operating_fact", "knowledge_gap", "opportunity", "tactic", "validation", "experience", "execution_task", "result"],
+    "epistemicStatuses": ["system_fact", "confirmed_background", "confirmed_operating_fact", "operator_record", "hypothesis", "candidate_experience", "accepted_experience", "unknown"],
+    "requiredReferences": ["id", "scope", "sourceRefs"],
+    "relationRules": [
+      "goal and decision are scoped to project or venue and must retain sourceRefs when available",
+      "operating_fact may support a hypothesis but does not prove its causal claim",
+      "validation and execution_task may update an experience candidate, but cannot publish an experience without result evidence",
+      "candidate_experience and unknown are never formal retrieval sources"
+    ]
+  },
+  "nodeAnalysisRequest": {
+    "task": "analyze_operating_node_v5",
+    "promptVersion": "operating-node-analysis-v5",
+    "period": "explicit start, end, timezone and period id",
+    "scope": "venue or all with a display label",
+    "node": "stable operating node, metric coverage and metric definition",
+    "metricDefinition": "aggregation grain, unit, formula and comparison policy",
+    "evidenceRegistry": "immutable id-addressable values calculated by the program",
+    "comparisonSet": "previous comparable period, rolling four-week baseline and up-to-eight-week trend",
+    "candidateSignals": "program-detected candidates that require expert review",
+    "dynamicSignals": "signals from the selected weekly review",
+    "longTermOpportunities": "persisted opportunities linked to the node",
+    "historicalExperiences": "accepted experience references",
+    "validationResults": "tactic execution and validation history",
+    "operatingContexts": "historical events, execution and confirmed reasons",
+    "availableLevers": "stable solution levers allowed for this node",
+    "calendarContext": "matched operating calendar entries with causal boundaries",
+    "industryContext": "explicit industry taxonomy, benchmark policy and zero or more sourced comparable benchmarks",
+    "projectProfile": "stable project, product, audience, funnel, asset and operating-constraint context",
+    "venueProfile": "current venue audience, traffic, space, staffing and constraint context",
+    "tacticCandidates": "knowledge-catalog tactics allowed for model ranking"
+  },
+  "nodeAnalysisResponse": {
+    "statusSummary": "evidence-bounded interpretation of the selected period and scope",
+    "expertSignals": "zero to five reviewed signals with include, kind, status, evidence refs, comparison basis, hypothesis, counterevidence, confidence, missing facts and a focused question",
+    "benchmarkAvailable": "whether a same-definition industry benchmark was actually supplied",
+    "recommendedLeverIds": "ids from availableLevers only",
+    "recommendedTacticIds": "ids from tacticCandidates only",
+    "tacticRationales": "fit explanations keyed by an allowed tactic id",
+    "analysisBoundary": "missing facts, uncertainty and causal boundary"
+  },
+  "longTermOpportunity": {
+    "id": "stable id",
+    "nodeId": "operating node",
+    "venue": "venue or all",
+    "title": "stable opportunity statement",
+    "summary": "current interpretation",
+    "priority": "high or medium",
+    "status": "active, observing or closed",
+    "sourceType": "finalized weekly review or confirmed AI candidate",
+    "sourcePeriod": "first supporting period",
+    "evidence": "references only",
+    "firstSeenAt": "ISO time",
+    "lastReviewedAt": "ISO time"
+  },
+  "validation": {
+    "tacticId": "stable tactic id",
+    "nodeId": "operating node",
+    "periodId": "execution period",
+    "venue": "execution scope",
+    "resultSummary": "operator-provided execution or result fact",
+    "status": "待验证, 验证中, 已验证 or 已否定",
+    "humanStatus": "operator-confirmed status; remains authoritative",
+    "aiReview": "evidence review, confounders, comparability, retest and experience-candidate recommendation",
+    "promptVersion": "tactic-validation-review-v2 when AI review succeeds",
+    "createdAt": "ISO time"
+  },
+  "tacticPlan": {
+    "id": "stable id from period, venue, node, opportunity and tactic",
+    "status": "draft, designed or ready",
+    "knowledgeVersion": "knowledge catalog version used for retrieval",
+    "promptVersion": "tactic-plan-design-v3",
+    "problemOrOpportunity": "selected current signal and evidence",
+    "solutionDirection": "selected stable lever",
+    "selectedTactic": "retrieved knowledge tactic",
+    "measurableGoal": "target metric, formula, baseline, target value, target window and rationale",
+    "executionDesign": "one complete path with audience, scenario, mechanism, ordered stages and resources",
+    "measurement": "primary, secondary and guardrail metrics, test days, comparison, success, stop and recording rules",
+    "technical": "requirements and search terms only; never fabricated repositories",
+    "updatedAt": "ISO time"
+  }
+}

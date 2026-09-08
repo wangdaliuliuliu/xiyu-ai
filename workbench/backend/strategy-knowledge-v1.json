@@ -1,0 +1,271 @@
+{
+  "version": "operating-strategy-knowledge-v2",
+  "updatedAt": "2026-08-29",
+  "purpose": "Reusable operating calendar, audience context and tactic knowledge. These entries are retrieval evidence, not weekly conclusions.",
+  "calendarRules": [
+    {
+      "id": "summer_peak",
+      "label": "暑期亲子出游高峰",
+      "monthDayStart": "07-01",
+      "monthDayEnd": "08-15",
+      "phase": "peak",
+      "audienceTags": ["parent_child", "tourist"],
+      "operatingFocus": ["放大有效获客渠道", "提高现场承接效率", "缩短首次体验决策路径"],
+      "source": "中国文旅行业通用运营日历",
+      "boundary": "具体暑假日期、景区客流和城市节奏需按当地校历与场地方确认"
+    },
+    {
+      "id": "late_summer_transition",
+      "label": "暑期尾声与开学过渡期",
+      "monthDayStart": "08-16",
+      "monthDayEnd": "09-07",
+      "phase": "transition",
+      "audienceTags": ["parent_child", "local_family"],
+      "operatingFocus": ["验证自然客流回落幅度", "把游客型客群转向本地家庭", "减少高成本粗放投放"],
+      "source": "中国文旅行业通用运营日历",
+      "boundary": "仅作为通用季节背景，不能单独证明某家门店客流下降的原因"
+    },
+    {
+      "id": "national_day_window",
+      "label": "国庆文旅窗口",
+      "monthDayStart": "09-25",
+      "monthDayEnd": "10-10",
+      "phase": "peak",
+      "audienceTags": ["tourist", "parent_child", "group"],
+      "operatingFocus": ["提前锁定内容和货盘", "设计高峰承接与排队机制", "同步准备节后召回"],
+      "source": "中国法定节假日与文旅运营通用经验",
+      "boundary": "法定放假安排需每年更新，门店应结合所在地客流预测"
+    },
+    {
+      "id": "winter_break_window",
+      "label": "寒假与春节亲子窗口",
+      "monthDayStart": "01-10",
+      "monthDayEnd": "02-28",
+      "phase": "peak",
+      "audienceTags": ["parent_child", "tourist", "group"],
+      "operatingFocus": ["亲子套餐与团体预约", "高峰接待容量", "节后次卡和私域承接"],
+      "source": "中国文旅行业通用运营日历",
+      "boundary": "春节为农历节日，实际窗口必须按当年日期校正"
+    },
+    {
+      "id": "term_time_low_season",
+      "label": "学期内常规低谷",
+      "monthDayStart": "09-08",
+      "monthDayEnd": "12-20",
+      "phase": "low",
+      "audienceTags": ["local_family", "school_group", "repeat_customer"],
+      "operatingFocus": ["提高周末转化", "拓展团体与研学", "召回存量用户", "用小规模实验替代粗放投放"],
+      "source": "亲子娱乐与文旅场馆通用运营经验",
+      "boundary": "节假日和城市活动需要从低谷规则中单独剔除"
+    }
+  ],
+  "venueProfiles": {
+    "all": {
+      "label": "VR大空间通用画像",
+      "audienceTags": ["parent_child", "walk_by", "parent_decider"],
+      "facts": ["体验决策同时受内容吸引力、现场可见性、价格门槛和陪同人意见影响"],
+      "confidence": "working_hypothesis",
+      "source": "当前产品定位，需由门店数据持续校正"
+    },
+    "东坝": {
+      "label": "东坝场域画像",
+      "audienceTags": ["parent_child", "science_museum_visitors", "walk_by", "parent_decider"],
+      "facts": ["自然客流与科技馆场域客流存在关联", "亲子家庭是需要重点验证的承接对象"],
+      "confidence": "operator_provided",
+      "source": "运营已提供的场域背景"
+    },
+    "中影": {
+      "label": "中影场域画像",
+      "audienceTags": ["walk_by", "parent_child", "parent_decider"],
+      "facts": ["详细场域来源和稳定用户结构仍需补充"],
+      "confidence": "incomplete",
+      "source": "当前周数据与待补充经营事实"
+    }
+  },
+  "industryContext": {
+    "taxonomy": {
+      "industryId": "offline_vr_large_space_paid_experience",
+      "label": "线下VR大空间付费体验项目",
+      "parentIndustries": ["线下沉浸式娱乐", "文旅场馆付费体验", "商业综合体娱乐体验"],
+      "segments": [
+        {"id": "venue_attached_science_museum", "label": "科技馆或文旅场馆依附型门店", "venueTags": ["中影"]},
+        {"id": "mall_or_cinema_walk_by", "label": "商场或影院自然客流型门店", "venueTags": ["东坝"]},
+        {"id": "mixed_unknown", "label": "场景尚未完整分类", "venueTags": ["all"]}
+      ]
+    },
+    "comparisonPolicy": {
+      "primary": "本店上一可比周期与近4至8周历史",
+      "secondary": "相同经营日历阶段与相近场域条件",
+      "industry": "只有指标定义、场景、地区和时间范围足够接近且来源可追溯时才使用",
+      "missingRule": "没有可靠同口径行业数据时返回暂无可信行业基准，不允许模型估算或编造"
+    },
+    "metricPolicies": {
+      "online_sales_amount": "优先比较本店历史、渠道结构和经营日历；行业金额不具备直接可比性",
+      "reception_traffic": "优先比较相同营业日和场域客流条件；跨场馆绝对客流仅作边界参考",
+      "sales_order_count": "优先比较本店历史并结合客流和接待链路判断",
+      "playback_total": "优先比较本店项目结构、营业时长和可用设备；跨店绝对次数需统一容量口径",
+      "average_ticket": "优先比较本店货盘与客群结构；行业对标需统一是否含次卡、团购和退款",
+      "cumulative_cards": "存量指标不做普通周环比，重点观察新增、核销、剩余权益和用户结构",
+      "repurchase_rate": "必须先统一可识别用户、新老客和复购窗口定义"
+    },
+    "benchmarks": []
+  },
+  "tacticCatalog": [
+    {
+      "id": "t-offline-game",
+      "nodeIds": ["entry", "first_purchase"],
+      "leverId": "offline_conversion",
+      "title": "门口体感小游戏引流",
+      "summary": "用低门槛大屏互动吸引场域自然客流，完成体验后发放带时效的到店优惠券。",
+      "goalBinding": {
+        "nodeMetric": "场域客流到接待客流转化率",
+        "formula": "接待客流 ÷ 场域客流",
+        "targetRule": "以执行前同星期、相近场域客流时段为基线，设定可量化提升目标",
+        "minimumTracking": ["场域客流", "驻足人数", "参与人数", "领券人数", "进店人数", "核销人数", "成交订单"]
+      },
+      "executionPath": [
+        {"stage": "吸引驻足", "action": "在门口可视位置用大屏展示短时、强反馈的IP体感玩法", "metric": "驻足人数"},
+        {"stage": "完成互动", "action": "让目标客群参加限时体感挑战，控制单局时长和排队", "metric": "参与人数与完成率"},
+        {"stage": "给出进店理由", "action": "挑战完成后发放有明确时效与权益的到店优惠", "metric": "领券率"},
+        {"stage": "店内承接", "action": "引导用户进店兑换，并由现场人员完成产品选择与首次体验说明", "metric": "进店率与核销率"},
+        {"stage": "完成成交闭环", "action": "记录兑换后的首单与升级购买，判断是否真正改善目标节点", "metric": "首单转化率与成交额"}
+      ],
+      "audienceTags": ["parent_child", "walk_by", "science_museum_visitors"],
+      "calendarIds": ["summer_peak", "late_summer_transition", "term_time_low_season"],
+      "sources": [
+        {"type": "industry_case", "label": "互动体验引流类行业案例", "evidenceLevel": "reference"},
+        {"type": "audience_profile", "label": "亲子与场域路过客群", "evidenceLevel": "context"}
+      ],
+      "metrics": {"primary": "接待客流", "secondary": ["参与人数", "优惠券领取率", "优惠券核销率", "首单转化率"], "guardrail": ["单次互动等待时长", "现场投诉"]},
+      "experiment": {"recommendedDays": 14, "comparison": "同星期、相近场域客流时段对照", "success": "接待客流和优惠券核销同时改善，且现场承接没有明显恶化"},
+      "planTemplate": ["固定基线、目标值和测试周期", "准备门口大屏与IP体感玩法", "按驻足→参与→领券→进店→核销→成交执行完整路径", "记录每个节点人数并复盘主要流失点"],
+      "technical": {"needed": true, "githubQueries": ["mediapipe pose browser game", "webcam pose runner javascript", "motion capture kiosk game"]}
+    },
+    {
+      "id": "t-offline-script",
+      "nodeIds": ["entry", "first_purchase"],
+      "leverId": "offline_conversion",
+      "title": "现场触达与讲解脚本",
+      "summary": "把路过、驻足、询问、试玩和成交拆成可观察的承接动作。",
+      "audienceTags": ["walk_by", "parent_child", "parent_decider"],
+      "calendarIds": ["summer_peak", "late_summer_transition", "term_time_low_season"],
+      "sources": [{"type": "internal_experience", "label": "现场承接经验", "evidenceLevel": "to_validate"}],
+      "metrics": {"primary": "接待客流", "secondary": ["驻足转询问率", "试玩率", "订单转化率"], "guardrail": ["平均讲解时长"]},
+      "experiment": {"recommendedDays": 7, "comparison": "同员工或同班次前后对照", "success": "接待到试玩、试玩到成交至少一个环节稳定改善"},
+      "planTemplate": ["拆分承接漏斗", "编写三种高频客群话术", "每日记录各环节人数", "复盘流失最大的环节"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-low-remind",
+      "nodeIds": ["entry", "value_card"],
+      "leverId": "low_price",
+      "title": "限期核销与预约提醒",
+      "summary": "对已购未到店用户设置明确的预约和核销提醒，减少低价票沉睡。",
+      "audienceTags": ["parent_child", "repeat_customer"],
+      "calendarIds": ["late_summer_transition", "term_time_low_season"],
+      "sources": [{"type": "internal_experience", "label": "次卡与核销运营经验", "evidenceLevel": "reference"}],
+      "metrics": {"primary": "核销率", "secondary": ["预约率", "到店人数", "二次加购"], "guardrail": ["退款率", "投诉率"]},
+      "experiment": {"recommendedDays": 14, "comparison": "提醒组与未提醒历史基线", "success": "核销提升且退款和投诉不显著增加"},
+      "planTemplate": ["筛选已购未核销用户", "设计分层提醒节奏", "绑定预约入口", "记录提醒到核销转化"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-content-ip",
+      "nodeIds": ["acquisition"],
+      "leverId": "content",
+      "title": "IP主题短视频",
+      "summary": "围绕目标客群熟悉的IP与真实体验卖点制作短视频。",
+      "audienceTags": ["parent_child", "tourist"],
+      "calendarIds": ["summer_peak", "national_day_window", "winter_break_window"],
+      "sources": [{"type": "internal_experience", "label": "内容获客经验", "evidenceLevel": "to_validate"}],
+      "metrics": {"primary": "渠道销售额", "secondary": ["曝光量", "完播率", "咨询率"], "guardrail": ["内容制作成本"]},
+      "experiment": {"recommendedDays": 14, "comparison": "同渠道不同主题素材对照", "success": "咨询率或归因销售额相对基线改善"},
+      "planTemplate": ["选定目标客群与IP主题", "制作三条差异化素材", "统一落地页和优惠", "比较曝光到成交漏斗"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-live-script",
+      "nodeIds": ["acquisition", "first_purchase"],
+      "leverId": "live",
+      "title": "直播脚本与货盘排序",
+      "summary": "根据观众进入、停留和下单路径调整讲解顺序与价格锚点。",
+      "audienceTags": ["parent_child", "tourist", "local_family"],
+      "calendarIds": ["summer_peak", "national_day_window", "winter_break_window"],
+      "sources": [{"type": "industry_case", "label": "本地生活直播转化方法", "evidenceLevel": "reference"}],
+      "metrics": {"primary": "直播成交率", "secondary": ["停留时长", "商品点击率", "核销率"], "guardrail": ["退款率"]},
+      "experiment": {"recommendedDays": 14, "comparison": "同主播脚本前后或分场次对照", "success": "成交率与后续核销率同时改善"},
+      "planTemplate": ["拆分直播转化节点", "重排货盘与讲解顺序", "设置统一优惠承接", "回看成交与核销"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-assort-trial",
+      "nodeIds": ["acquisition", "first_purchase", "value_card"],
+      "leverId": "assortment",
+      "title": "低价尝鲜票",
+      "summary": "降低首次体验决策门槛，同时明确到店后的升级路径。",
+      "audienceTags": ["walk_by", "parent_child", "parent_decider"],
+      "calendarIds": ["late_summer_transition", "term_time_low_season"],
+      "sources": [{"type": "internal_experience", "label": "现有低价票与核销数据", "evidenceLevel": "reference"}],
+      "metrics": {"primary": "购票成交订单", "secondary": ["核销率", "二次加购率", "客单价"], "guardrail": ["毛利率", "退款率"]},
+      "experiment": {"recommendedDays": 14, "comparison": "原货盘与尝鲜票货盘对照", "success": "新增成交和后续加购能覆盖价格让利"},
+      "planTemplate": ["设定尝鲜权益边界", "设计现场升级路径", "限定渠道与数量", "追踪核销和二次加购"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-service-choice",
+      "nodeIds": ["first_purchase"],
+      "leverId": "service_conversion",
+      "title": "首次到店产品选择引导",
+      "summary": "根据人数、年龄、体验偏好和可用时间快速缩小产品选择。",
+      "audienceTags": ["parent_child", "parent_decider", "walk_by"],
+      "calendarIds": ["summer_peak", "late_summer_transition", "term_time_low_season"],
+      "sources": [{"type": "internal_experience", "label": "门店讲解与成交经验", "evidenceLevel": "to_validate"}],
+      "metrics": {"primary": "首单转化率", "secondary": ["平均决策时长", "项目选择完成率"], "guardrail": ["退改率"]},
+      "experiment": {"recommendedDays": 7, "comparison": "引导卡使用前后对照", "success": "转化提升且决策时长没有增加"},
+      "planTemplate": ["梳理四个关键选择问题", "制作产品选择卡", "培训统一引导方式", "记录询问到成交"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-content-usage",
+      "nodeIds": ["experience"],
+      "leverId": "content_mix",
+      "title": "低利用项目客群匹配测试",
+      "summary": "把低利用项目与更合适的年龄、人数和体验偏好重新匹配。",
+      "audienceTags": ["parent_child", "group"],
+      "calendarIds": ["term_time_low_season", "summer_peak"],
+      "sources": [{"type": "internal_experience", "label": "项目播控与现场反馈", "evidenceLevel": "reference"}],
+      "metrics": {"primary": "项目播控次数", "secondary": ["项目选择率", "满意度"], "guardrail": ["等待时长"]},
+      "experiment": {"recommendedDays": 14, "comparison": "推荐前后项目结构对照", "success": "低利用项目选择率改善且满意度不下降"},
+      "planTemplate": ["识别低利用项目", "定义适配客群", "调整推荐入口", "比较项目结构和反馈"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-card-recall",
+      "nodeIds": ["value_card", "customer_asset", "repurchase"],
+      "leverId": "card_operation",
+      "title": "次卡存量召回",
+      "summary": "按剩余权益、距上次到店时间和适用客群分层召回。",
+      "audienceTags": ["repeat_customer", "parent_child"],
+      "calendarIds": ["late_summer_transition", "term_time_low_season"],
+      "sources": [{"type": "internal_experience", "label": "次卡累计与核销数据", "evidenceLevel": "reference"}],
+      "metrics": {"primary": "召回核销数", "secondary": ["响应率", "到店率", "复购率"], "guardrail": ["退卡率"]},
+      "experiment": {"recommendedDays": 21, "comparison": "不同召回人群与历史自然核销基线", "success": "增量核销明确且没有透支后续自然到店"},
+      "planTemplate": ["建立存量用户分层", "设计差异化召回理由", "记录触达与到店", "评估增量核销"],
+      "technical": {"needed": false, "githubQueries": []}
+    },
+    {
+      "id": "t-measure-repeat",
+      "nodeIds": ["repurchase"],
+      "leverId": "measurement",
+      "title": "建立复购与转介绍周统计",
+      "summary": "先建立可持续的用户标识、来源和复购定义，再讨论增长打法。",
+      "audienceTags": ["repeat_customer"],
+      "calendarIds": [],
+      "sources": [{"type": "measurement_rule", "label": "经营分析数据完整性要求", "evidenceLevel": "required"}],
+      "metrics": {"primary": "可识别复购订单占比", "secondary": ["复购率", "转介绍订单", "召回到店率"], "guardrail": ["漏记率"]},
+      "experiment": {"recommendedDays": 28, "comparison": "先建立基线，不做效果归因", "success": "连续四周可稳定记录并能回溯来源"},
+      "planTemplate": ["统一新客与老客定义", "增加用户与来源字段", "建立周统计口径", "抽样复核数据准确性"],
+      "technical": {"needed": true, "githubQueries": ["customer source tracking schema", "retention cohort dashboard open source"]}
+    }
+  ]
+}

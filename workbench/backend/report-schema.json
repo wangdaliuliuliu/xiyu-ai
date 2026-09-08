@@ -1,0 +1,55 @@
+{
+  "version": "6.4",
+  "purpose": "Weekly operating review workflow from evidence to a finalized, copyable report.",
+  "workflowStages": ["investigating", "curating", "finalized"],
+  "package": {
+    "schemaVersion": "weekly-report-package-v1",
+    "key": "periodId + venue",
+    "commonContext": "period-level project and calendar context only",
+    "venueReports": "one independent report, data input, investigation, context, experience/action set and revision history per venue",
+    "legacyCombinedAnalysis": "read-only compatibility reference for reports created before venue splitting"
+  },
+  "request": {
+    "period": {"id": "string", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "timezone": "IANA timezone"},
+    "scope": {"level": "venue", "venue": "string", "periodId": "string"},
+    "structuredFacts": "immutable current, previous, and historical operating data",
+    "operatingFacts": "events, execution, confirmed reasons, playback notes, and result evidence",
+    "retrieval": "relevant historical conclusions and accepted experience"
+  },
+  "dataSemantics": {
+    "channels": {
+      "scope": "all_products_by_sales_channel",
+      "meaning": "Sales performance of all products grouped by sales channel.",
+      "metrics": ["salesTickets", "salesAmount"],
+      "notCardOnly": true,
+      "rule": "channels and channelAnalysis must never be labeled or interpreted as card-only sales, even when a channel includes some card products."
+    },
+    "cards": {
+      "scope": "card_products_only",
+      "meaning": "Facts for card products such as 5-use cards and 10-use cards, read only from the independent cards dataset.",
+      "source": "cards",
+      "rule": "cards and cardAnalysis must never be inferred, backfilled, or validated from channel salesTickets or salesAmount."
+    },
+    "crossScope": "Channel and card facts are separate metric scopes. A relationship may be discussed only when explicit, traceable cross-scope evidence exists."
+  },
+  "analysis": {
+    "investigations": [{"signalId": "stable id", "status": "needs_input|follow_up|resolved|doubtful|observing", "evidence": "immutable calculated facts", "currentQuestion": "one focused question", "turns": "ordered user answers and AI assessments retained in the card"}],
+    "reviewConclusions": "report-writer records with one observation, one direct business judgment, one decision boundary, resolutionLevel, and writerStyleVersion",
+    "experienceCandidates": "zero or more selectable/editable AI or manual candidates",
+    "evidenceTasks": "zero or more evidence collection tasks attached to unresolved conclusions, never rendered as business actions",
+    "actionCandidates": "zero or more selectable/editable intervention candidates; AI candidates require objective, rationale, scope, time window, owner, steps, metric, baseline, completion standard, stop condition, and linked conclusions",
+    "promptTrace": "versioned prompt ids used in generation"
+  },
+  "finalSnapshot": {"reviewConclusions": "frozen conclusions", "experiences": "selected experience candidates only", "actions": "selected action candidates only", "generatedAt": "ISO timestamp", "promptTrace": "prompt ids used for traceability"},
+  "rules": [
+    "Program-calculated facts are immutable.",
+    "Causal dialogue stays inside its review card and is never copied into the final report.",
+    "Experience, evidence tasks, and actions are generated only after review synthesis.",
+    "Stopping a dialogue is independent from causal resolution; primary_supported is a resolved conclusion with explicit residual uncertainty.",
+    "Information collection is stored as evidenceTasks and must not occupy the next-action section.",
+    "Final report prose is written from the report author's perspective; investigation narration, operator quotation, and repeated metrics are forbidden.",
+    "The final report is available only after candidate curation and finalization.",
+    "channels and channelAnalysis are all-product channel sales facts (sales tickets and sales amount), never card-only facts.",
+    "cards and cardAnalysis contain only independent card-product facts and must not be derived from channels."
+  ]
+}
