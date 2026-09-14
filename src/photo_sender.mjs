@@ -57,7 +57,7 @@ function envFlag(name, fallback = true) {
 
 function requestCooldownMs() {
   const minutes = Number(process.env.PHOTO_REQUEST_COOLDOWN_MINUTES || 10);
-  return Math.max(1, Number.isFinite(minutes) ? minutes : 10) * 60_000;
+  return Math.max(0, Number.isFinite(minutes) ? minutes : 10) * 60_000;
 }
 
 function pick(list) {
@@ -245,6 +245,7 @@ export const REALISM_PERSON = Object.freeze([
 ]);
 export const REALISM_SELFIE = Object.freeze([
   'ordinary unfiltered phone rendering under the scene\'s existing ambient light, with scene-appropriate auto-exposure, white balance, focus softness and image noise',
+  'front-camera imperfections must arise from the lived moment: slight motion blur when she or the camera is moving, close-range focus softness, mild lens distortion, uneven exposure or sensor noise only where the current scene supports them',
 ]);
 export const REALISM_ACTIVITY = Object.freeze([
   'natural close phone-camera perspective focused on the requested object or activity',
@@ -573,9 +574,11 @@ export async function sendCompanionPhoto({
     const availableReferencePaths = (Array.isArray(visual?.referenceImagePaths) && visual.referenceImagePaths.length
       ? visual.referenceImagePaths
       : [visual?.referenceImagePath]).filter(Boolean);
-    const referencePaths = visual?.capabilities?.provider === 'iotwq'
-      ? availableReferencePaths.slice(0, 3)
-      : availableReferencePaths.slice(0, 1);
+    // Production identity follows the product's original "one locked image"
+    // contract. Multi-reference inputs are useful for isolated A/B research,
+    // but generated angle variants must never be blended into the live face
+    // identity: if those variants drift, the provider averages different people.
+    const referencePaths = availableReferencePaths.slice(0, 1);
     if (!isNoFaceShot({ shotMode, scenePrompt }) && visual?.capabilities?.referenceImage && referencePaths.length) {
       try {
         const loaded = [];

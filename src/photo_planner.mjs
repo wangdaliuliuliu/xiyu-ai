@@ -51,7 +51,8 @@ const NO_FACE_ROUTE_CONFLICT_RE = /\b(?:selfie|self[- ]portrait|front[- ]camera|
 // 出现在画面里。SELFIE 的 prompt 应描述前摄最终成像，而不是描述拍照动作。
 const SELFIE_VISIBLE_DEVICE_RE = /\b(?:(?:phone|front camera)\s+held\s+(?:up\s+)?(?:in\s+front\s+of\s+her|at\s+(?:chest|face|eye|shoulder)(?:[- ]level)?)|front camera(?:\s+selfie)?\s+at\s+arm(?:'s|s)?[- ]length|(?:she\s+)?(?:is\s+)?hold(?:s|ing)\s+(?:her|a|the)\s+(?:smart)?phone|(?:one|her)\s+arm\s+(?:is\s+)?(?:partially\s+)?(?:visible\s+)?(?:extended|reaching)\s+(?:toward|towards)\s+(?:the\s+)?camera(?:\s+(?:while\s+)?holding\s+(?:her|a|the)\s+(?:smart)?phone)?|(?:looks?|glances?|turns?\s+her\s+head)\b[^,.;]{0,40}\b(?:at|toward|towards|from)\s+(?:the|her)\s+(?:smart)?phone|eyes?\s+on\s+(?:the\s+)?screen|mirror\s+selfie)\b/i;
 const SELFIE_BOTH_HANDS_RE = /\b(?:(?:with|using)\s+both\s+hands|both\s+hands\s+(?:are\s+)?(?:holding|gripping|carrying|occupied|busy))\b/i;
-const STANDARD_SELFIE_RE = /\b(?:standing|sitting)\b[^.]{0,100}\b(?:looking (?:at|into) the camera|gentle smile|warm smile)\b|\b(?:centered|symmetrical|posed) (?:portrait|selfie|composition)\b/i;
+const DIRECT_CAMERA_ATTENTION_RE = /\b(?:look(?:s|ing)?|glance(?:s|d|ing)?|gaze(?:s|d|ing)?|eyes?(?:\s+are)?(?:\s+fixed)?|attention)\b[^,.;]{0,48}\b(?:at|into|toward|towards|on)\s+(?:the\s+)?(?:front[- ](?:facing\s+)?camera|camera|lens)\b|\bdirect (?:eye contact|camera attention|gaze)\b/i;
+const STANDARD_SELFIE_RE = /\b(?:standing|sitting|reclining|lying)\b[^.]{0,140}\b(?:look(?:s|ing)?|glance(?:s|d|ing)?|gaze(?:s|d|ing)?)\b[^,.;]{0,48}\b(?:at|into|toward|towards)\s+(?:the\s+)?(?:front[- ](?:facing\s+)?camera|camera|lens)\b|\b(?:gentle|warm) smile\b|\b(?:centered|centred|symmetrical|posed) (?:portrait|selfie|composition|framing)\b/i;
 const THIRD_PERSON_SELFIE_RE = /\b(?:over (?:her )?shoulder|from behind|camera follows her|seen watching her|observer(?:'s)? view)\b/i;
 const EXPLICIT_POSED_REQUEST_RE = /(?:认真|正经|正式|好好|端正|站好|拍清楚|看清楚|证件照).{0,8}(?:拍|照片|自拍)|(?:拍|照片|自拍).{0,8}(?:认真|正经|正式|好好|端正|清楚)/i;
 
@@ -145,7 +146,9 @@ export function isImageProviderConfigured(provider = process.env.IMAGE_PROVIDER 
 
 export function getPhotoLimits() {
   return {
-    requestCooldownMinutes: numberEnv('PHOTO_REQUEST_COOLDOWN_MINUTES', 10, 1),
+    // 0 explicitly disables the user-request cooldown; proactive cadence is
+    // controlled separately by PHOTO_PROACTIVE_MIN_HOURS.
+    requestCooldownMinutes: numberEnv('PHOTO_REQUEST_COOLDOWN_MINUTES', 10, 0),
     dailyLimitPerCompanion: Math.floor(numberEnv('PHOTO_DAILY_LIMIT_PER_COMPANION', 3, 0)),
     proactiveMinHours: numberEnv('PHOTO_PROACTIVE_MIN_HOURS', 36, 1),
     requestEnabled: envFlag('PHOTO_REQUEST_ENABLED', true),
@@ -560,7 +563,7 @@ export function selectVisualCandidate(raw, {
       if (STANDARD_SELFIE_RE.test(prompt)) score -= 6;
       if (/\b(?:centered|centred|symmetrical)\b/i.test(haystack)) score -= 10;
       if (/\bclose-up selfie\b|\bface filling most of the frame\b/i.test(haystack)) score -= 4;
-      if (/\b(?:looking directly at|eyes on) (?:the )?(?:camera|lens)\b|\bwarm,? open expression\b/i.test(haystack)) score -= 3;
+      if (DIRECT_CAMERA_ATTENTION_RE.test(haystack) || /\bwarm,? open expression\b/i.test(haystack)) score -= 3;
       if (/\b(?:straight-on|front-facing|facing (?:the )?camera|facing forward)\b/i.test(haystack)) score -= 5;
       if (/\bsoft,? even exposure\b/i.test(haystack)) score -= 2;
       if (/\b(?:off-camera|glancing sideways|medium shot|transition light|mixed light)\b/i.test(haystack)) score += 2;
@@ -574,7 +577,7 @@ export function selectVisualCandidate(raw, {
     if (contextIsEnRoute && /\b(?:inside|has just (?:sat|picked|arrived)|sitting at)\b/i.test(haystack)) score -= 9;
     if (contextIsEnRoute && /\bpaus(?:e|es|ed|ing)\b/i.test(haystack)) score -= 3;
     if (/smiling expression/i.test(recentPhotoContext) && /\bsmil(?:e|es|ing)\b/i.test(haystack)) score -= 4;
-    if (/front-facing gaze/i.test(recentPhotoContext) && /\b(?:direct eye contact|looking (?:at|into) the camera|front-facing)\b/i.test(haystack)) score -= 3;
+    if (/front-facing gaze/i.test(recentPhotoContext) && (DIRECT_CAMERA_ATTENTION_RE.test(haystack) || /\bfront-facing\b/i.test(haystack))) score -= 3;
     return { candidate: preparedCandidate, prompt, index, score };
   }).filter(Boolean).sort((a, b) => b.score - a.score || a.index - b.index);
   return scored[0] || null;
@@ -742,6 +745,47 @@ export function seasonalClothingHint(now = new Date()) {
 
 // v1.22.0: 近期照片只作为“反重复”参考，不把上一张照片当作身份模板。
 // 使用已有审计记录做轻量、确定性的特征摘要，不增加任何大模型调用。
+export function extractRecentPhotoFeatures(row = {}) {
+  const text = String(row.final_prompt || '').toLowerCase();
+  const features = [];
+  let selected = null;
+  try {
+    const plan = typeof row.plan_json === 'string' ? JSON.parse(row.plan_json) : row.plan_json;
+    selected = plan?.selectedVisualCandidate || null;
+  } catch {
+    selected = null;
+  }
+  const shot = String(row.shot_mode || '').trim();
+  if (shot) features.push(shot);
+  if (/mirror selfie|bathroom mirror/.test(text)) features.push('mirror framing');
+  else if (/phone front camera|front-camera|phone selfie/.test(text)) features.push('phone selfie');
+  if (/off-center|slightly imperfect framing|cropped|edge of the frame/.test(text)) features.push('imperfect framing');
+  const attention = String(selected?.attentionState || '').toLowerCase();
+  const composition = String(selected?.compositionFamily || '').toLowerCase();
+  const variationTags = Array.isArray(selected?.variationTags)
+    ? selected.variationTags.map((tag) => safeText(tag, 40).toLowerCase()).filter(Boolean)
+    : [];
+  if (/profile|looking away|gazing away|head turned|tilted head/.test(text) || /off-camera|split|activity|side/.test(attention)) features.push('non-frontal gaze');
+  else if (DIRECT_CAMERA_ATTENTION_RE.test(`${text} ${attention}`) || /direct eye contact|face clearly in focus/.test(text)) features.push('front-facing gaze');
+  if (composition) features.push(`composition:${composition}`);
+  for (const tag of variationTags.slice(0, 4)) features.push(`visual:${tag}`);
+  if (/smile|smiling|grin|cheerful/.test(text)) features.push('smiling expression');
+  else if (/neutral|thoughtful|pensive|relaxed expression/.test(text)) features.push('quieter expression');
+  for (const place of ['bedroom', 'living room', 'sofa', 'desk', 'cafe', 'kitchen', 'street', 'balcony', 'park']) {
+    if (text.includes(place)) {
+      features.push(`${place} setting`);
+      break;
+    }
+  }
+  for (const garment of ['cardigan', 'hoodie', 'tee', 'blouse', 'dress', 'pajamas', 'sweater']) {
+    if (text.includes(garment)) {
+      features.push(`${garment} wardrobe`);
+      break;
+    }
+  }
+  return [...new Set(features)];
+}
+
 function recentPhotoVariationContext(companionId, limit = 3) {
   if (!companionId) return '';
   try {
@@ -753,29 +797,7 @@ function recentPhotoVariationContext(companionId, limit = 3) {
     })?.rows || [];
     const extracted = rows.map((row) => {
       // 只读最终送给生图模型的 prompt；planner_prompt 含规则示例，不能拿来当照片特征。
-      const text = String(row.final_prompt || '').toLowerCase();
-      const features = [];
-      const shot = String(row.shot_mode || '').trim();
-      if (shot) features.push(shot);
-      if (/mirror selfie|bathroom mirror/.test(text)) features.push('mirror framing');
-      else if (/phone front camera|front-camera|phone selfie/.test(text)) features.push('phone selfie');
-      if (/off-center|slightly imperfect framing|cropped|edge of the frame/.test(text)) features.push('imperfect framing');
-      if (/profile|looking away|gazing away|head turned|tilted head/.test(text)) features.push('non-frontal gaze');
-      else if (/direct eye contact|looking into the camera|face clearly in focus/.test(text)) features.push('front-facing gaze');
-      if (/smile|smiling|grin|cheerful/.test(text)) features.push('smiling expression');
-      else if (/neutral|thoughtful|pensive|relaxed expression/.test(text)) features.push('quieter expression');
-      for (const place of ['bedroom', 'living room', 'sofa', 'desk', 'cafe', 'kitchen', 'street', 'balcony', 'park']) {
-        if (text.includes(place)) {
-          features.push(`${place} setting`);
-          break;
-        }
-      }
-      for (const garment of ['cardigan', 'hoodie', 'tee', 'blouse', 'dress', 'pajamas', 'sweater']) {
-        if (text.includes(garment)) {
-          features.push(`${garment} wardrobe`);
-          break;
-        }
-      }
+      const features = extractRecentPhotoFeatures(row);
       return {
         line: `- photo ${row.id}: ${features.join(', ') || 'recent sent photo'}`,
         features,

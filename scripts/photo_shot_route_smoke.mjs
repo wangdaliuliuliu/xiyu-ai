@@ -86,6 +86,8 @@ assert.match(finalSelfie, /direct captured output from the smartphone front-faci
 assert.match(finalSelfie, /no visible phone/i);
 assert.match(finalSelfie, /ordinary unfiltered phone rendering/i);
 assert.match(finalSelfie, /scene-appropriate auto-exposure, white balance, focus softness and image noise/i);
+assert.match(finalSelfie, /slight motion blur when she or the camera is moving/i);
+assert.match(finalSelfie, /only where the current scene supports them/i);
 assert.doesNotMatch(finalSelfie, /holding (?:her|a|the) (?:smart)?phone|phone held up in front of her/i);
 assert.doesNotMatch(finalSelfie, /arm (?:is )?(?:partially )?(?:visible )?(?:extended|reaching).*holding.*phone/i);
 

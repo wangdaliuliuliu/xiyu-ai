@@ -4,6 +4,7 @@
 import {
   planPhotoMessage,
   normalizePhotoPromptForShot,
+  extractRecentPhotoFeatures,
   selectFreshPhotoContext,
   selectVisualCandidate,
 } from '../src/photo_planner.mjs';
@@ -44,6 +45,43 @@ const selection = selectVisualCandidate({
 }, { captureIntent: 'lived', recentPhotoContext: 'repeat guard: smiling expression' });
 ok(selection?.index === 1, '普通索图优先选择有活动、环境影响且非摆拍的候选');
 ok((selection?.prompt.match(/realistic casual phone snapshot/gi) || []).length === 1, '通用质感词只在候选合并后追加一次');
+
+const subtleDirectGaze = selectVisualCandidate({
+  visualCandidates: [
+    {
+      visualMoment: 'Reclining on the sofa, she glances up toward the front camera with a gentle expression.',
+      cameraRelationship: 'Loose phone selfie framing.',
+      environmentalEffect: 'Even room light.', attentionState: 'attention on the front camera',
+      compositionFamily: 'ordinary selfie', activityVisible: false, posed: false,
+      timelineRelation: 'current', wardrobe: 'a casual tee', variationTags: ['sofa'],
+    },
+    {
+      visualMoment: 'Still sorting the clean laundry beside her, she pauses with one sleeve half-folded and turns slightly as the shutter catches the movement.',
+      cameraRelationship: 'A close off-axis front-camera angle with the laundry and bed edge sharing the frame.',
+      environmentalEffect: 'Window backlight causes slight exposure unevenness and the moving sleeve edge is softly blurred.',
+      attentionState: 'attention remains split between folding and the lens',
+      compositionFamily: 'off-axis activity continuation', activityVisible: true, posed: false,
+      timelineRelation: 'current', wardrobe: 'a casual home tee', variationTags: ['folding', 'off-axis', 'motion'],
+    },
+  ],
+}, { captureIntent: 'lived' });
+ok(subtleDirectGaze?.index === 1, 'toward front camera 等隐性正脸措辞不会再挤掉持续动作候选');
+
+const priorFeatures = extractRecentPhotoFeatures({
+  shot_mode: 'SELFIE',
+  final_prompt: 'direct front-camera phone selfie in a bedroom with slightly imperfect framing',
+  plan_json: JSON.stringify({
+    selectedVisualCandidate: {
+      attentionState: 'attention split between folding laundry and the lens',
+      compositionFamily: 'off-axis activity continuation',
+      variationTags: ['folding', 'moving sleeve', 'window backlight'],
+    },
+  }),
+});
+ok(priorFeatures.includes('non-frontal gaze'), '反重复摘要保留上一张的分心式注意力');
+ok(priorFeatures.includes('composition:off-axis activity continuation'), '反重复摘要保留上一张的实际构图');
+ok(priorFeatures.includes('visual:folding'), '反重复摘要保留上一张的动作标签');
+
 
 const cleanedPhoneCue = normalizePhotoPromptForShot({
   shotMode: 'SELFIE',
