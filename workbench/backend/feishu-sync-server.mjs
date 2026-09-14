@@ -1492,19 +1492,28 @@ async function searchExternalWeb(query, options = {}) {
     if (!response.ok) throw new Error(`外部检索服务 HTTP ${response.status}`);
     return { provider: 'configured', results: normalizeExternalResults(body.results || body.items || body.data, cleanQuery), fetchedAt: new Date().toISOString() };
   }
-  if (provider !== 'duckduckgo') return { provider: 'not-configured', results: [], message: '未配置可用的外部检索服务，请在服务端配置 EXTERNAL_SEARCH_API_ENDPOINT。' };
-  const response = await fetchExternal(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleanQuery)}`, { headers: { 'User-Agent': 'yuanqu-operating-strategy-workbench/1.0' } });
+  if (!['duckduckgo', 'bing'].includes(provider)) return { provider: 'not-configured', results: [], message: '未配置可用的外部检索服务，请在服务端配置 EXTERNAL_SEARCH_API_ENDPOINT。' };
+  const searchUrl = provider === 'bing'
+    ? `https://www.bing.com/search?q=${encodeURIComponent(cleanQuery)}&setlang=zh-hans`
+    : `https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleanQuery)}`;
+  const response = await fetchExternal(searchUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; yuanqu-operating-strategy-workbench/1.0)' } });
   const html = await response.text();
   if (!response.ok) throw new Error(`外部检索 HTTP ${response.status}`);
   const results = [];
-  const blocks = html.match(/<div class="result results_links[^>]*>[\s\S]*?<\/div>\s*<\/div>/gi) || [];
+  const blocks = provider === 'bing'
+    ? (html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [])
+    : (html.match(/<div class="result results_links[^>]*>[\s\S]*?<\/div>\s*<\/div>/gi) || []);
   for (const block of blocks) {
-    const link = block.match(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    const link = provider === 'bing'
+      ? block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+      : block.match(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
     if (!link) continue;
-    const snippet = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a?>/i);
+    const snippet = provider === 'bing'
+      ? block.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
+      : block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a?>/i);
     results.push({ title: stripHtml(link[2]), url: link[1], snippet: stripHtml(snippet?.[1] || '') });
   }
-  return { provider: 'duckduckgo', results: normalizeExternalResults(results, cleanQuery), fetchedAt: new Date().toISOString() };
+  return { provider, results: normalizeExternalResults(results, cleanQuery), fetchedAt: new Date().toISOString() };
 }
 
 async function readExternalSource(url) {
@@ -1540,10 +1549,17 @@ async function tenantAccessToken() {
 
 async function feishuRequest(method, endpoint, body) {
   const token = await tenantAccessToken();
-  const response = await fetch(`${API_BASE}${endpoint}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || (data.code !== undefined && data.code !== 0)) throw new Error(`飞书 API 失败：${data.msg || `HTTP ${response.status}`}（code ${data.code ?? response.status}）`);
-  return data;
+  const readOnly = String(method || 'GET').toUpperCase() === 'GET';
+  for (let attempt = 1; attempt <= (readOnly ? 2 : 1); attempt++) {
+    const response = await fetch(`${API_BASE}${endpoint}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && (data.code === undefined || data.code === 0)) return data;
+    if (readOnly && attempt === 1 && [502, 503, 504].includes(response.status)) continue;
+    const error = new Error(`飞书 API 失败：${data.msg || `HTTP ${response.status}`}（code ${data.code ?? response.status}）`);
+    error.httpStatus = response.status;
+    error.feishuCode = data.code;
+    throw error;
+  }
 }
 
 function excelSerialToIso(value) {
@@ -2744,9 +2760,17 @@ const server = http.createServer(async (req, res) => {
         if (plan.status === 'ready' && !authorizeXiyuScope({ ...input, scope: { ...input.scope, venueIds: [plan.venueId], venueNames: [plan.venue] } }).allowed) return json(res, 403, { ok: false, error: '无权访问所选来源门店' });
         let result;
         try { result = plan.status === 'ready' ? await lookupSourceFact(plan) : plan; }
-        catch (error) { result = { status: 'unavailable', reason: error.message }; }
-        context = { schemaVersion: 'enterpriseContext-v3', scope: input.scope, items: [], sourceLookup: result, missingInformation: result.status === 'complete' ? [] : [result.reason || '来源行或指标不完整，不能将缺失当作零'], boundaries: [result.boundary || '只回答所选来源中已核对的精确日期和门店'] };
-        if (result.status === 'complete') context.items.push({ id: `source:${plan.capabilityId}:${plan.venueId}:${plan.date}`, assetType: 'operating_fact', epistemicStatus: 'system_fact', title: `${plan.date} ${plan.venue}`, summary: JSON.stringify({ venue: plan.venue, periodStart: plan.date, periodEnd: plan.date, core: result.core, sourceTitle: result.sourceTitle, sourceUrl: result.sourceUrl, boundary: result.boundary }), scope: { projectId: input.projectId, venue: plan.venue }, refs: [{ url: result.sourceUrl }] });
+        catch (error) {
+          const accessDenied = [401, 403].includes(Number(error?.httpStatus)) || /(?:HTTP|code)\s*(?:401|403)|权限|无权|拒绝访问/i.test(String(error?.message || ''));
+          result = { status: accessDenied ? 'forbidden' : 'unavailable', reason: accessDenied ? '来源服务拒绝了本次读取权限' : error.message };
+        }
+        const missingInformation = result.status === 'complete' ? [] : [result.reason, ...(result.missingDates || []).map(date => `${date} 的完整来源资料缺失`), ...(result.daily || []).flatMap(row => (row.missingSources || []).map(source => `${row.date} 缺少来源 ${source}`))].filter(Boolean);
+        context = { schemaVersion: 'enterpriseContext-v3', scope: input.scope, items: [], sourceLookup: result, missingInformation, boundaries: [result.boundary || '只回答所选来源中已核对的精确日期和门店'] };
+        for (const row of (result.daily || [])) {
+          if (!Object.keys(row.core || {}).length) continue;
+          const urls = (row.sources || []).map(source => source.url).flat().filter(Boolean);
+          context.items.push({ id: `source:${plan.capabilityIds?.join('+') || plan.capabilityId}:${plan.venueId}:${row.date}`, assetType: 'operating_fact', epistemicStatus: row.status === 'complete' ? 'system_fact' : 'system_fact_partial', title: `${row.date} ${plan.venue}`, summary: JSON.stringify({ venue: plan.venue, periodStart: row.date, periodEnd: row.date, core: row.core, sourceTitle: (row.sources || []).map(source => source.title).join('、'), sourceUrl: urls, boundary: result.boundary, missingSources: row.missingSources }), scope: { projectId: input.projectId || input.scope?.projectId, venue: plan.venue }, refs: urls.map(url => ({ url })) });
+        }
       } else context = buildEnterpriseKnowledgeContext({ ...input, scope: { ...(input.scope || {}), projectId: input.projectId || input.scope?.projectId } });
       auditXiyuKnowledge('retrieve', authorization, { itemCount: context.items?.length || 0 });
       return json(res, 200, { ok: true, context });

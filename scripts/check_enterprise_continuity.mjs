@@ -2,7 +2,7 @@ import 'dotenv/config';
 import assert from 'node:assert/strict';
 import { buildEnterpriseFactReply, enterpriseResponseDirective, extractWorkIntelligence } from '../src/enterprise_context.mjs';
 
-const context = { items: [{ id: 'fixture', summary: { venue: '东坝', periodStart: '2026-08-15', periodEnd: '2026-08-21', core: { box_office_total: 123, reception_traffic: null } } }] };
+const context = { items: [{ id: 'fixture', title: '合成经营表', summary: { venue: '东坝', periodStart: '2026-08-15', periodEnd: '2026-08-21', sourceTitle: '合成经营表', core: { box_office_total: 123, reception_traffic: null } } }] };
 assert.equal(buildEnterpriseFactReply({ message: '东坝昨天销售额多少', context, now: new Date('2026-08-22T12:00:00Z') }).matched, false);
 assert.equal(buildEnterpriseFactReply({ message: '东坝接待客流多少', context }).matched, false);
 assert.equal(buildEnterpriseFactReply({ message: '东坝销售额多少', context }).matched, true);

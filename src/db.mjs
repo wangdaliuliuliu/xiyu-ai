@@ -85,6 +85,9 @@ function migrateAgencyState() {
       desire_version TEXT NOT NULL,
       domain TEXT NOT NULL CHECK (domain IN ('work','personal','mixed')),
       desired_change TEXT NOT NULL,
+      desired_direction TEXT NOT NULL DEFAULT '',
+      unknowns_json TEXT NOT NULL DEFAULT '[]',
+      next_review_condition TEXT NOT NULL DEFAULT '',
       appraisal_summary TEXT NOT NULL DEFAULT '',
       basis_refs_json TEXT NOT NULL DEFAULT '[]',
       semantic_key TEXT NOT NULL,
@@ -95,6 +98,7 @@ function migrateAgencyState() {
       expires_at TEXT,
       reconsider_after TEXT,
       last_feedback_at TEXT,
+      last_contact_at TEXT,
       linked_business_task_ref TEXT,
       legacy_task_id TEXT
     );
@@ -147,6 +151,20 @@ function migrateAgencyState() {
     );
     CREATE INDEX IF NOT EXISTS idx_agency_feedback_intention
       ON agency_feedback(intention_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS agency_concern_events (
+      id TEXT PRIMARY KEY,
+      account_id INTEGER NOT NULL,
+      companion_id INTEGER NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+      intention_id TEXT REFERENCES agency_intentions(id) ON DELETE SET NULL,
+      action_id TEXT REFERENCES agency_actions(id) ON DELETE SET NULL,
+      event_kind TEXT NOT NULL,
+      source_refs_json TEXT NOT NULL DEFAULT '[]',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      expected_version INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_agency_concern_events_intention
+      ON agency_concern_events(account_id, companion_id, intention_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS agency_runtime (
       account_id INTEGER NOT NULL, companion_id INTEGER NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
       lease_token TEXT, fencing INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0,
@@ -161,6 +179,16 @@ function migrateAgencyState() {
     );
     CREATE INDEX IF NOT EXISTS idx_agency_budget_owner_day ON agency_budget_reservations(account_id, companion_id, day);
   `);
+  const columns = new Set(db.prepare('PRAGMA table_info(agency_intentions)').all().map(row => row.name));
+  const additions = [
+    ['desired_direction', "TEXT NOT NULL DEFAULT ''"],
+    ['unknowns_json', "TEXT NOT NULL DEFAULT '[]'"],
+    ['next_review_condition', "TEXT NOT NULL DEFAULT ''"],
+    ['last_contact_at', 'TEXT'],
+  ];
+  for (const [name, definition] of additions) {
+    if (!columns.has(name)) db.exec(`ALTER TABLE agency_intentions ADD COLUMN ${name} ${definition}`);
+  }
 }
 
 const AGENCY_INTENTION_STATES = new Set(['candidate', 'preparing', 'ready', 'waiting_user', 'active', 'suspended', 'completed', 'abandoned', 'expired']);
@@ -208,6 +236,9 @@ function parseAgencyIntention(row) {
     ...row,
     desireVersion: row.desire_version,
     desiredChange: row.desired_change,
+    desiredDirection: row.desired_direction || '',
+    unknowns: parseAgencyJson(row.unknowns_json, []),
+    nextReviewCondition: row.next_review_condition || '',
     appraisalSummary: row.appraisal_summary,
     basisRefs: parseAgencyJson(row.basis_refs_json),
     semanticKey: row.semantic_key,
@@ -215,6 +246,16 @@ function parseAgencyIntention(row) {
     linkedBusinessTaskRef: row.linked_business_task_ref,
     legacyTaskId: row.legacy_task_id,
     version: Number(row.version),
+  };
+}
+
+function parseAgencyConcernEvent(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    sourceRefs: parseAgencyJson(row.source_refs_json, []),
+    payload: parseAgencyJson(row.payload_json, {}),
+    expectedVersion: row.expected_version === null || row.expected_version === undefined ? null : Number(row.expected_version),
   };
 }
 
@@ -244,7 +285,7 @@ function parseAgencyFeedback(row) {
   return row ? { ...row, confidence: Number(row.confidence) } : null;
 }
 
-export function createAgencyIntention({ id = null, accountId, companionId, desireVersion = 'desire-v1', domain = 'mixed', desiredChange = '', appraisalSummary = '', basisRefs = [], semanticKey = '', state = 'candidate', priorityClass = 'normal', expiresAt = null, reconsiderAfter = null, linkedBusinessTaskRef = null, legacyTaskId = null } = {}) {
+export function createAgencyIntention({ id = null, accountId, companionId, desireVersion = 'desire-v1', domain = 'mixed', desiredChange = '', desiredDirection = '', unknowns = [], nextReviewCondition = '', appraisalSummary = '', basisRefs = [], semanticKey = '', state = 'candidate', priorityClass = 'normal', expiresAt = null, reconsiderAfter = null, linkedBusinessTaskRef = null, legacyTaskId = null } = {}) {
   const owner = normalizeAgencyOwner(accountId, companionId);
   // waiting_user is a delivery result, never a creation shortcut. It can only
   // be entered by the receipt transaction after an action is really delivered.
@@ -253,9 +294,9 @@ export function createAgencyIntention({ id = null, accountId, companionId, desir
   const dbx = getDb();
   dbx.prepare(`
     INSERT INTO agency_intentions
-      (id, account_id, companion_id, desire_version, domain, desired_change, appraisal_summary, basis_refs_json, semantic_key, state, priority_class, expires_at, reconsider_after, linked_business_task_ref, legacy_task_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(intentionId, owner.accountId, owner.companionId, String(desireVersion), domain, String(desiredChange).slice(0, 1000), String(appraisalSummary || '').slice(0, 2000), agencyJson(basisRefs), String(semanticKey).slice(0, 300), state, String(priorityClass || 'normal'), expiresAt, reconsiderAfter, linkedBusinessTaskRef, legacyTaskId);
+      (id, account_id, companion_id, desire_version, domain, desired_change, desired_direction, unknowns_json, next_review_condition, appraisal_summary, basis_refs_json, semantic_key, state, priority_class, expires_at, reconsider_after, linked_business_task_ref, legacy_task_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(intentionId, owner.accountId, owner.companionId, String(desireVersion), domain, String(desiredChange).slice(0, 1000), String(desiredDirection || '').slice(0, 1000), agencyJson(unknowns, []), String(nextReviewCondition || '').slice(0, 1000), String(appraisalSummary || '').slice(0, 2000), agencyJson(basisRefs), String(semanticKey).slice(0, 300), state, String(priorityClass || 'normal'), expiresAt, reconsiderAfter, linkedBusinessTaskRef, legacyTaskId);
   return getAgencyIntention(intentionId, owner);
 }
 
@@ -285,7 +326,7 @@ export function findAgencyIntentionBySemanticKey({ accountId, companionId, seman
   return parseAgencyIntention(getDb().prepare(`SELECT * FROM agency_intentions WHERE account_id = ? AND companion_id = ? AND semantic_key = ? ${stateClause} ORDER BY updated_at DESC LIMIT 1`).get(owner.accountId, owner.companionId, String(semanticKey).slice(0, 300)));
 }
 
-export function updateAgencyIntention(id, { accountId, companionId, expectedVersion = null, state = undefined, appraisalSummary = undefined, basisRefs = undefined, reconsiderAfter = undefined, expiresAt = undefined, priorityClass = undefined, linkedBusinessTaskRef = undefined, lastFeedbackAt = undefined, completionEvidence = [], resumeEvidence = [] } = {}) {
+export function updateAgencyIntention(id, { accountId, companionId, expectedVersion = null, state = undefined, appraisalSummary = undefined, basisRefs = undefined, desiredDirection = undefined, unknowns = undefined, nextReviewCondition = undefined, reconsiderAfter = undefined, expiresAt = undefined, priorityClass = undefined, linkedBusinessTaskRef = undefined, lastFeedbackAt = undefined, lastContactAt = undefined, completionEvidence = [], resumeEvidence = [] } = {}) {
   const owner = normalizeAgencyOwner(accountId, companionId);
   if (!owner || !id || !Number.isInteger(expectedVersion) || expectedVersion < 1) return null;
   const current = getAgencyIntention(id, owner);
@@ -300,11 +341,15 @@ export function updateAgencyIntention(id, { accountId, companionId, expectedVers
   if (state !== undefined) add('state', state);
   if (appraisalSummary !== undefined) add('appraisal_summary', String(appraisalSummary).slice(0, 2000));
   if (basisRefs !== undefined) add('basis_refs_json', agencyJson(basisRefs));
+  if (desiredDirection !== undefined) add('desired_direction', String(desiredDirection || '').slice(0, 1000));
+  if (unknowns !== undefined) add('unknowns_json', agencyJson(unknowns, []));
+  if (nextReviewCondition !== undefined) add('next_review_condition', String(nextReviewCondition || '').slice(0, 1000));
   if (reconsiderAfter !== undefined) add('reconsider_after', reconsiderAfter);
   if (expiresAt !== undefined) add('expires_at', expiresAt);
   if (priorityClass !== undefined) add('priority_class', String(priorityClass));
   if (linkedBusinessTaskRef !== undefined) add('linked_business_task_ref', linkedBusinessTaskRef);
   if (lastFeedbackAt !== undefined) add('last_feedback_at', lastFeedbackAt);
+  if (lastContactAt !== undefined) add('last_contact_at', lastContactAt);
   if (!fields.length) return getAgencyIntention(id, owner);
   fields.push('version = version + 1', 'updated_at = CURRENT_TIMESTAMP');
   const versionClause = expectedVersion === null ? '' : ' AND version = ?';
@@ -412,6 +457,35 @@ export function listAgencyFeedback({ accountId, companionId, intentionId = null,
   return rows.map(parseAgencyFeedback);
 }
 
+// Durable concern audit: evidence, proposal effects and receipts all share
+// the same owner-scoped event stream as agency_intentions/actions/feedback.
+export function recordAgencyConcernEvent({ id = null, accountId, companionId, intentionId = null, actionId = null, eventKind = '', sourceRefs = [], payload = {}, expectedVersion = null } = {}) {
+  const owner = normalizeAgencyOwner(accountId, companionId);
+  if (!owner || !eventKind) return null;
+  if (intentionId && !getAgencyIntention(intentionId, owner)) return null;
+  if (actionId && !getAgencyAction(actionId, owner)) return null;
+  const eventId = String(id || agencyId('ace'));
+  try {
+    getDb().prepare(`INSERT INTO agency_concern_events
+      (id, account_id, companion_id, intention_id, action_id, event_kind, source_refs_json, payload_json, expected_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(eventId, owner.accountId, owner.companionId, intentionId, actionId, String(eventKind).slice(0, 120), agencyJson(sourceRefs, []), agencyJson(payload, {}), expectedVersion === null || expectedVersion === undefined ? null : Number(expectedVersion));
+  } catch (error) {
+    if (!String(error?.message || '').includes('UNIQUE')) throw error;
+  }
+  return parseAgencyConcernEvent(getDb().prepare('SELECT * FROM agency_concern_events WHERE id=? AND account_id=? AND companion_id=?').get(eventId, owner.accountId, owner.companionId));
+}
+
+export function listAgencyConcernEvents({ accountId, companionId, intentionId = null, limit = 50 } = {}) {
+  const owner = normalizeAgencyOwner(accountId, companionId);
+  if (!owner) return [];
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+  const rows = intentionId
+    ? getDb().prepare(`SELECT * FROM agency_concern_events WHERE account_id=? AND companion_id=? AND intention_id=? ORDER BY created_at DESC LIMIT ${safeLimit}`).all(owner.accountId, owner.companionId, String(intentionId))
+    : getDb().prepare(`SELECT * FROM agency_concern_events WHERE account_id=? AND companion_id=? ORDER BY created_at DESC LIMIT ${safeLimit}`).all(owner.accountId, owner.companionId);
+  return rows.map(parseAgencyConcernEvent);
+}
+
 /** Owner-scoped fencing. No write transaction is held while awaiting a tool. */
 export function acquireAgencyLease({ accountId, companionId, now = Date.now(), token = agencyId('lease') } = {}) {
   const owner = normalizeAgencyOwner(accountId, companionId);
@@ -437,9 +511,9 @@ export function releaseAgencyLease({ accountId, companionId, token, fencing } = 
 export function reserveAgencyBudget({ accountId, companionId, purpose, inputTokens, outputTokens, attempts = 1, now = Date.now(), freeReflection = false } = {}) {
   const owner = normalizeAgencyOwner(accountId, companionId);
   const tokens = Number(inputTokens) + Number(outputTokens);
-  if (!owner || !['appraise', 'plan', 'schema_repair', 'review', 'research_summary'].includes(purpose) || !Number.isSafeInteger(tokens) || tokens <= 0 || inputTokens < 0 || outputTokens < 0) return null;
+  if (!owner || !['appraise', 'plan', 'continue', 'schema_repair', 'review', 'research_summary'].includes(purpose) || !Number.isSafeInteger(tokens) || tokens <= 0 || inputTokens < 0 || outputTokens < 0) return null;
   const day = new Date(now + 8 * 3600_000).toISOString().slice(0, 10);
-  const formation = ['appraise', 'plan', 'schema_repair'].includes(purpose) ? Math.max(1, Math.min(8, Number(attempts) || 1)) : 0;
+  const formation = ['appraise', 'plan', 'continue', 'schema_repair'].includes(purpose) ? Math.max(1, Math.min(8, Number(attempts) || 1)) : 0;
   return getDb().transaction(() => {
     const spent = getDb().prepare('SELECT COALESCE(SUM(attempts),0) AS calls, COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(free_reflection),0) AS reflections FROM agency_budget_reservations WHERE account_id=? AND companion_id=? AND day=?').get(owner.accountId, owner.companionId, day);
     if (spent.calls + formation > 8 || spent.tokens + tokens > 24000 || (freeReflection && spent.reflections >= 2)) return null;
@@ -492,6 +566,16 @@ export function commitAgencyFeedback({ accountId, companionId, intentionId, expe
       if (!saved) throw new Error('invalid_feedback');
       const intention = updateAgencyIntention(intentionId, { ...update, ...owner, expectedVersion });
       if (!intention) throw new Error('invalid_transition');
+      recordAgencyConcernEvent({
+        id: `feedback:${saved.id}`,
+        ...owner,
+        intentionId,
+        actionId: feedback.actionId || null,
+        eventKind: 'feedback',
+        sourceRefs: update.basisRefs || [],
+        payload: { kind: feedback.kind, sourceMessageId: feedback.sourceMessageId, interpretation: feedback.interpretation || '' },
+        expectedVersion,
+      });
       return { status: 'committed', feedback: saved, intention };
     }).immediate();
   } catch (error) { return { status: 'invalid', error: error.message }; }
@@ -507,8 +591,19 @@ export function commitAgencyReceipt({ accountId, companionId, intentionId, actio
       const saved = updateAgencyAction(actionId, { ...owner, expectedVersion: actionVersion, state: receipt.state, providerMessageIds: receipt.providerMessageIds, resultRefs: receipt.resultRefs });
       if (!saved) throw new Error('invalid_receipt');
       const state = receipt.state === 'delivered' ? (action.needsUserInput ? 'waiting_user' : 'active') : receipt.state === 'prepared' ? 'ready' : 'suspended';
-      const updated = updateAgencyIntention(intentionId, { ...owner, expectedVersion: intentionVersion, state });
+      const delivered = receipt.state === 'delivered' && Array.isArray(receipt.providerMessageIds) && receipt.providerMessageIds.length > 0;
+      const updated = updateAgencyIntention(intentionId, { ...owner, expectedVersion: intentionVersion, state, lastContactAt: delivered ? new Date().toISOString() : undefined });
       if (!updated) throw new Error('invalid_receipt_transition');
+      recordAgencyConcernEvent({
+        id: `receipt:${actionId}:${actionVersion}:${receipt.state}`,
+        ...owner,
+        intentionId,
+        actionId,
+        eventKind: 'delivery_receipt',
+        sourceRefs: Array.isArray(receipt.resultRefs) ? receipt.resultRefs : [],
+        payload: { state: receipt.state, providerMessageIds: receipt.providerMessageIds || [], resultRefs: receipt.resultRefs || [] },
+        expectedVersion: intentionVersion,
+      });
       return { status: 'committed', action: saved, intention: updated };
     }).immediate();
   } catch (error) { return { status: 'invalid', error: error.message }; }

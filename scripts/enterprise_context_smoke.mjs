@@ -32,7 +32,7 @@ const route = {
   intent: { topics: ['场域客流'], assetTypes: ['venue_profile'] },
   retrievalNeeded: true, writebackPotential: true, confidence: 0.9
 };
-const prepared = await prepareEnterpriseContext({ message: '门店A场域客流回落', history: [] }, {
+const prepared = await prepareEnterpriseContext({ message: '门店A场域客流回落', history: [], accountId: 'smoke-account', companionId: 'smoke-companion' }, {
   route: () => route,
   retrieve: async () => ({ contextVersion: 'enterprise-context-v1', items: [{ id: 'profile:venue:VENUE_A', assetType: 'venue_profile', epistemicStatus: 'confirmed_background', title: '门店A', summary: '门店A与场域客流相关。' }], boundaries: ['背景不能单独证明因果'], missingInformation: [], fingerprint: 'smoke' })
 });
@@ -48,7 +48,7 @@ const direct = await extractWorkIntelligence({ route, context: prepared.context,
   extract: async () => JSON.stringify({ candidates: [{ candidateType: 'operating_fact_candidate', statement: '门店A又补充了一个事实', source: { quote: '门店A又补充了一个事实' } }] })
 });
 if (direct.savedCount !== 1 || (await drainEnterpriseOutbox({ force: true })).remaining !== 0) throw new Error('候选 outbox 未能投递并清空');
-const personal = await prepareEnterpriseContext({ message: '今天有点累', history: [] }, { route: () => ({ conversationType: 'personal', workSegments: [], retrievalNeeded: false, writebackPotential: false, confidence: 0.98 }) });
+const personal = await prepareEnterpriseContext({ message: '今天有点累', history: [], accountId: 'smoke-account', companionId: 'smoke-companion' }, { route: () => ({ conversationType: 'personal', workSegments: [], retrievalNeeded: false, writebackPotential: false, confidence: 0.98 }) });
 if (personal.promptBlock || personal.context) throw new Error('纯私人聊天不应携带经营上下文');
 if (!calls.some(call => call.url.endsWith('/api/knowledge/catalog'))) throw new Error('未读取动态目录');
 console.log(JSON.stringify({ ok: true, catalogCalls: calls.filter(call => call.url.endsWith('/api/knowledge/catalog')).length, retrieveCalls: calls.filter(call => call.url.endsWith('/api/knowledge/retrieve')).length, candidatePosts: calls.filter(call => call.url.endsWith('/api/intelligence/candidates')).length, mixedPrompt: formatEnterpriseContext(prepared.context).length, candidateCount: saved.length + direct.savedCount }));

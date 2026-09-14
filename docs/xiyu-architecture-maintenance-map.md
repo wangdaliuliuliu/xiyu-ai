@@ -2,9 +2,9 @@
 
 当前开发按 [开发方案 v2](agency-development-plan-v2-2026-09-08.md) 和 [验证方案 v2](agency-validation-plan-v2-2026-09-08.md) 实施，进度见 [实施记录](agency-v2-implementation-log-2026-09-08.md)。下面的旧链路描述保留作历史对照，不应作为v2目标顺序。v2目标是先理解/选择/准备，再过原主动硬时机门；明确用户请求直接执行，最后校验结果与真实交付。
 
-> **2026-09-08 当前状态更正**：本文以下涉及“统一动念链已接入/只观测/边界已保证”的描述须结合 [完整对照核查](agency-conformance-audit-2026-09-08.md)阅读。当前是部分实现，尚未满足开发规范；尤其准备与时机顺序、静默执行、shadow 隔离、跨轮续接、状态迁移及验收存在明确偏差。线上无新增 agency 模块/表，业务桥接目录返回404。保留本图作为现状定位资料，不作为已完成或发布证明。
+> **2026-09-12 当前状态**：生产源码已在原链完成提示词强绑定、稳定 intention 连续性、默认企业知识查询和工具证据自动写回；本地隔离验证通过。线上是否生效仍以 [2026-09-12 生产接入记录](validation/2026-09-12/agency-production-integration.md)中的部署段为准，不能只凭本地代码或健康接口宣称发布完成。
 
-更新：2026-09-07。此文件是以后修改主动联系、人格、记忆和业务辅助前的固定入口。
+更新：2026-09-12。此文件是以后修改主动联系、人格、记忆和业务辅助前的固定入口。
 
 统一主动性、企业认知深度与沟通策略的下一阶段设计见 [溪语统一主动性、企业认知与沟通策略设计](unified-agency-and-engagement-design-2026-09-06.md)。该设计保留本文的唯一执行链和模块边界，不允许另起第二套中枢。
 
@@ -22,7 +22,7 @@
 4. **时机判断**：`src/proactive_engine.mjs` 计算 motivation，并接收已选经营事件。高价值事件可以进入时机判断，不会在读取经营资料之前被普通陪伴退场规则挡掉；安全、硬间隔和去重仍在发送层生效。
 5. **主动意图**：`src/initiative.mjs` 生成可行动候选，先过事实条件，再按价值、紧迫性和时机选择一个 purpose。它回答“为什么联系、想促成什么、用哪种行动、怎样才算完成”。
 6. **统一动念链**：`src/proactive.mjs` 的 `runAgencyCycle()` 在 `shadow/enabled` 模式调用 `src/agency_protocol.mjs` 生成 appraisal/plan/feedback 协议，并把持续状态写入 `db.mjs` 的 `agency_intentions`、`agency_actions`、`agency_feedback`。它不另起 scheduler、selector 或 sender；`legacy` 默认不增加调用。
-   准备类动作在同一入口继续执行：`lookup/analyze/research/prepare_media/wait` 先进入 `running`，再由 `deps.execute*`（或对应 adapter）落 `prepared`/`failed`；没有适配器明确记 `infra_failure` 并挂起动念，不能留下 `planned` 伪结果。`contact_*` 仍交给下方原发送器和真实回执事务。
+   准备类动作在同一入口继续执行：`lookup/analyze/research/prepare_media/wait` 先进入 `running`，再由 `deps.execute*`（或对应 adapter）落 `prepared`/`failed`；生产 `lookup` 默认复用 `enterprise_context.mjs` 的目录和按范围检索，其余能力没有适配器时明确记 `infra_failure` 并挂起动念，不能留下 `planned` 伪结果。成功工具结果由运行时压缩写回原 intention 的 `basisRefs`，模型无需复制整份状态。`contact_*` 仍交给下方原发送器和真实回执事务。
 7. **人格表达**：`src/companion.mjs` 汇总原有人格；`src/ai.mjs` 调用原有模型；`src/proactive.mjs` 提供本次主动表达约束和 enabled 模式的一次语义出站复核。
 8. **复核**：`src/moderation.mjs` 处理通用出站风险，`src/intent_dedup.mjs` 处理意图复读，`src/initiative.mjs` 复核本次意图事实边界；`agency_protocol.mjs` 只复核动念/策略一致性，不按题材或固定句式拦截。
 9. **投递**：文字仍由 `src/ilink.mjs` 发送，图片仍由 `src/media.mjs` 上传后交给 iLink。`initiative.mjs` 和 `agency_protocol.mjs` 都不发送消息。
@@ -40,6 +40,7 @@
 | 人设、口吻、关系阶段下的表达 | `src/companion.mjs` 及既有 emotion/relationship arc 模块 | 不在 initiative 复制整套人格 |
 | 记忆召回、长期摘要、约定跟进 | 既有 memory、open_loops、plan_tasks、current_works 模块 | 不在 initiative 新建记忆库 |
 | 企业资料路由与事件 | `src/enterprise_context.mjs`；来源能力属于工作台 `backend/cognition/source-router.mjs` | 不让 proactive 扫全部知识库 |
+| 入站自然语言工作任务 | `src/bot.mjs` / `src/playground.mjs` → `src/enterprise_context.mjs` → DeepSeek taskTransition → `/api/knowledge/catalog` → `/api/knowledge/retrieve` → `source-router.mjs` → 原回复与发送链 | 不新增聊天入口、模型客户端、状态库或发送器；不得把关键词解析当主入口 |
 | 企业主动开关、日报/补问与订单表监控策略 | `/api/companions/:id/enterprise-proactive` → `src/db.mjs` policy → `src/proactive.mjs` → `src/enterprise_context.mjs` | 不与普通陪伴开关混成一个字段；订单表事件必须带当前 accountId/companionId，不向所有绑定角色广播 |
 | 文案安全、疾病/照片等真实性 | `src/moderation.mjs` | initiative 只管本次动念契约，不复制通用审核 |
 | 文字/图片实际发送 | `src/ilink.mjs`、`src/media.mjs` | 禁止新建第二套发送器 |
@@ -47,11 +48,27 @@
 
 ## 这次到底改了什么
 
+### 2026-09-12 入站工作任务链维护边界
+
+> **2026-09-14 回合决策升级**：`classifyWorkContext()` 的同一次 DeepSeek 调用现在先输出 `turnDecision`，统一描述用户动作、显性要求、隐含需要、对话模式、任务关系、是否取证、回应目标和推理深度，再按需生成工作任务。话题相关不等于任务续接；情绪表达和开放脑暴可以保留业务话题，但不会因此检索、续任务或触发确定性报数。`bot.mjs` 不再用原文事实词候选强制切入工作模式；确定性事实回复只在 `explicitAsk=fact_lookup` 时拥有最终事实兜底权。`initiative.mjs` 的入站回应意图优先消费同一个 `turnDecision`，没有新增模型调用、路由器、状态库或发送链。
+
+入站工作请求由 `enterprise_context.mjs` 的 `classifyWorkContext()` 生成结构化任务帧：`taskTransition`、`goal`、`completeQuestion`、catalog 约束的 `scope`、`timeSpec`、`requestedOutcome`、`businessMeaning`、`metricIds` 和 `missingSlots`。模型输入包含本轮消息、最近 8 个有效 turn、当前 active task、上海日期和授权 catalog；模型只做语义理解，不读取企业资料。
+
+跨轮任务仍复用 `enterprise_context.mjs` 的 `enterprise_context_active_tasks.json` 原子持久化，不进入 `companion_memories`。入站任务使用 `origin=inbound` 和 `collecting/ready/executing/answered/suspended` 状态；主动触达继续使用原有 active task 状态。`start/continue/revise/complete/exit` 分别创建、合并、覆盖并清理旧证据、结束或挂起任务；目录校验在状态写入和检索前都执行，目录外实体不会进入 scope。
+
+资料执行必须把结构化任务传给工作台。`source-router.mjs` 以 task 的 scope、timeSpec、requestedOutcome 和 metricIds 为主入口，旧原文解析只兼容旧调用。`recent_complete_days` 默认最近 3 个已结束且有完整资料的自然日，最多 7 日；销售与客流可以从多个来源合并，结果保留实际日期、指标、来源和缺失。只读 catalog/retrieve 对 502/503/504 最多重试一次；失败保留任务，不要求用户重述。
+
+事实回复继续经过 `finalizeEnterpriseReply()`：数字、日期、门店和来源必须在工具结果中，部分结果先交付可靠部分，`not_found`、权限拒绝和服务失败分别表达。真实 Bot 投递仍只走原有 `bot.mjs` → `ilink.mjs` 链路，本任务的隔离回归禁止触达真实 Bot。
+
 本次在不替换既有发送链的前提下新增 `src/agency_protocol.mjs`、`config/agency-prompts.v1.json` 和 `db.mjs` 的三张 agency 状态表；`src/proactive.mjs` 增加可关闭的 `runAgencyCycle()` 适配层，`bot.mjs` 在 shadow/enabled 下读取等待中的动念并记录结构化反馈。旧版会随机把每日一个普通时段替换成 `photo`；现已取消。照片只有在已发生日程事实或已核验手头事项能形成情节时，才作为候选行动参与选择，最后仍交给原 `photo_planner.mjs` 与 `photo_sender.mjs`。
 
 本轮又修正了经营供给和陪伴时机之间的断点：以前只有普通陪伴时机通过后才会刷新工作台，因此业务事件无法影响这次是否值得联系；现在每个 canonical tick 先按日报/知识策略刷新并读取少量候选，再把候选交给原有 timingDecision。工作台不再用“一天全局只能有一个事件”挡住日报和知识补全；两种 purpose 各自去重、各自受策略配额约束。知识事件还允许进入高价值、明确阻挡经营决策的诊断缺口，避免真正要命的问题只能停留在周报。刷新或读取失败时不写入检查时间，避免把连接故障伪装成“今天没有知识补全”。
 
 当前 `initiative.mjs` 明确禁止拥有以下职责：定时器、模型客户端、记忆数据库、企业源读取和微信发送。未来若它开始承担这些职责，就说明边界已经漂移。
+
+提示词绑定不再依赖进程当前目录：`agency_protocol.mjs` 从模块相对路径读取配置，验证 `schemaVersion`、`promptVersion` 和五个必需段，并计算 SHA-256。读取或版本校验失败会在模型调用前返回 `inconclusive`，不会静默使用空提示词。绑定版本/hash 同时进入日志、cycle 结果和 intention 证据，便于线上核对“模型到底吃到哪一版”。
+
+intention 的连续性键以候选类型及首个来源锚点为准，不包含会变化的工具证据。经营事件优先复用同一 `linkedBusinessTaskRef`；新资料会追加到原 intention，而不会因为证据列表变化新建一条近似动念。
 
 ## 后续修改协议
 

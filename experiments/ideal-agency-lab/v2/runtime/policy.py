@@ -14,9 +14,13 @@ class PolicyError(RuntimeError):
 
 
 class Policy:
-    def __init__(self, store: EventStore, *, allowed_tools: set[str] | None = None, delivery_enabled: bool = True, writable_root: pathlib.Path | None = None):
+    def __init__(self, store: EventStore, *, allowed_tools: set[str] | None = None, delivery_enabled: bool = True, writable_root: pathlib.Path | None = None, concerns_enabled: bool = False, max_concern_patches: int = 3):
         self.store = store
+        self.concerns_enabled = bool(concerns_enabled)
+        self.max_concern_patches = max_concern_patches
         self.allowed_tools = allowed_tools or {"catalog", "profile.read", "knowledge.search", "knowledge.read", "memory.search", "tasks.read", "tasks.update", "knowledge.propose", "knowledge.confirm", "research", "media.prepare"}
+        if self.concerns_enabled:
+            self.allowed_tools = set(self.allowed_tools) | {"concerns.read"}
         self.delivery_enabled = delivery_enabled
         self.writable_root = writable_root.resolve() if writable_root else None
 
@@ -59,3 +63,8 @@ class Policy:
         if not reconsider_condition.strip():
             raise ContractError("wait requires reconsider_condition")
 
+    def check_concern_updates(self, updates: list[dict[str, Any]]) -> None:
+        if not self.concerns_enabled and updates:
+            raise PolicyError("concerns_arm_disabled")
+        if len(updates) > self.max_concern_patches:
+            raise PolicyError("concern_patch_limit_exceeded")

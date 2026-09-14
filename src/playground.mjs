@@ -47,7 +47,7 @@ import { prepareEnterpriseContext, extractWorkIntelligence, splitConversationPer
 // probe（探针模式）：跑通整条对话链路（含 #310 的 inner-OS double-pass）但**零持久化**——
 // 不写 conversation turns / memory / emotion / profile / safety / open loops / postProcess。
 // 供 scripts/playground_probe.mjs 每日合成探针用（对外通道心跳），配合合成 companion id<0 双保险。
-export async function playgroundChat(companion, userText, { probe = false, accountId = null } = {}) {
+export async function playgroundChat(companion, userText, { probe = false, accountId = null, probeEnterprise = false } = {}) {
   if (!companion) throw new Error('companion 不存在');
   const text = String(userText || '').trim();
   if (!text) throw new Error('userText 不能为空');
@@ -316,5 +316,14 @@ export async function playgroundChat(companion, userText, { probe = false, accou
       relationship_stage: after.relationship_stage,
     },
     enterprise: { ...enterpriseTurnSummary(enterpriseTurn), resultStatus: finalResult.resultStatus, outputOrigin: finalResult.outputOrigin },
+    ...(probe && probeEnterprise ? {
+      enterpriseDebug: {
+        route: enterpriseTurn.route,
+        context: enterpriseTurn.context,
+        enterpriseResult: enterpriseTurn.enterpriseResult,
+        factResult,
+        finalResult,
+      },
+    } : {}),
   };
 }

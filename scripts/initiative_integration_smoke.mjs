@@ -13,12 +13,12 @@ assert.match(source, /buildInitiativeDecision\([\s\S]*timingDecision: opts\.timi
 assert.match(source, /photoOpportunity/);
 assert.doesNotMatch(source, /items\[pick\.idx\] = \{ \.\.\.items\[pick\.idx\], kind: 'photo' \}/);
 assert.match(source, /initiativeDecision\.action === 'send_story_photo'/);
-assert.match(source, /const userMessage = \[initiativePrompt\(initiativeDecision\), userMessageBase\]/);
+assert.match(source, /let userMessage = \[initiativePrompt\(initiativeDecision\), userMessageBase\]/);
 assert.match(source, /initiativeReplyIssue\(initiativeDecision, reply\)/);
 assert.doesNotMatch(source, /我同事真的服了|外卖怎么还没到啊|刷到个视频笑死/);
 assert.match(source, /保留本次已选目的和真实事实/);
 assert.match(source, /totalStickers\+\+;\s*sentAnySegment = true;/);
-assert.match(source, /recordInitiative\(deliveryIssue \? 'partial' : 'delivered'/);
+assert.match(source, /recordInitiative\(deliveryIssue \|\| !agencyReceiptCommitted \|\| deliveryState !== 'delivered' \? 'partial' : 'delivered'/);
 
 console.log(JSON.stringify({
   status: 'passed',

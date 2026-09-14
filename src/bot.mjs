@@ -178,36 +178,11 @@ function pickPhotoBusyReply() {
 // v1.10.40: 异步生图防并发锁 — companion_id 在 inflight 时拒绝再触发
 const inflightPhoto = new Set();
 
-function agencyTerms(text) {
-  const normalized = String(text || '').toLowerCase();
-  const terms = new Set(normalized.match(/[a-z0-9_:-]{2,}/gi) || []);
-  for (const run of normalized.match(/[\u4e00-\u9fff]+/g) || []) {
-    if (run.length >= 2) terms.add(run);
-    for (let size = 2; size <= Math.min(4, run.length); size++) {
-      for (let i = 0; i + size <= run.length; i++) terms.add(run.slice(i, i + size));
-    }
-  }
-  return terms;
-}
-
-function chooseAgencyContinuation(intentions, { userText = '', route = null } = {}) {
-  const candidates = Array.isArray(intentions) ? intentions : [];
-  if (!candidates.length) return null;
-  if (route?.replyToActiveTask === true) return candidates[0];
-  const text = String(userText || '').trim();
-  const shortAck = /^(?:嗯+|好+|行|可以|是的?|对|收到|知道了|明白了|继续|然后呢|咋样|怎么样)[。！!？?，,、~～\s]*$/i.test(text);
-  if (shortAck) return candidates.find(item => item.state === 'waiting_user') || candidates[0];
-  const terms = agencyTerms(text);
-  if (!terms.size) return null;
-  let best = null;
-  for (const item of candidates) {
-    const basis = [item.desiredChange, item.appraisalSummary, item.linkedBusinessTaskRef, ...(item.basisRefs || [])].join(' ');
-    const hits = [...agencyTerms(basis)].filter(term => terms.has(term) || text.toLowerCase().includes(term));
-    const domainHit = route?.conversationType === 'work' ? item.domain === 'work' : route?.conversationType === 'personal' ? item.domain === 'personal' : false;
-    const score = hits.length + (domainHit ? 0.25 : 0);
-    if (score >= 1 && (!best || score > best.score)) best = { item, score };
-  }
-  return best?.item || null;
+// Concern continuity is selected by durable state and owner scope. Semantic
+// routing decides whether the message is work/private/mixed; this pointer must
+// not infer intent from substrings or invented entities.
+function selectCurrentAgencyConcern(intentions) {
+  return (Array.isArray(intentions) ? intentions : []).find(item => item && !['completed', 'abandoned', 'expired'].includes(item.state)) || null;
 }
 
 // v1.21.5 (PR-B, 照片承诺兑现链)：重构为「承诺前可行性闸门」结构。
@@ -789,11 +764,11 @@ async function processUserTurn({ companion, binding, ctx, botId, fromUser, conte
   const msg = { fromUser, contextToken };
   inflightUsers.add(fromUser);  // 回复期间占用，防同一用户并发回复（调用前已查 has）
   const enterpriseRefreshRequested = isEnterpriseRefreshRequest(userText);
-  // 原话规则只作为“可能涉及企业资料”的候选；具体是否为数字查询，
-  // 等语义路由返回 metricIds 后再裁决，避免画像/客群问题被误判成报数。
-  const enterpriseFactLookupCandidate = isEnterpriseFactLookupRequest(userText);
   let enterpriseFactLookupRequested = false;
-  const enterpriseDataRequested = enterpriseRefreshRequested || enterpriseFactLookupCandidate;
+  // Ordinary fact lookup is authorized only by the semantic turn decision.
+  // Raw words may identify an explicit refresh for the slow-task UX, but may
+  // never force a personal/emotional turn into work mode.
+  const enterpriseDataRequested = enterpriseRefreshRequested;
   // 普通资料/数字查询不再先发一个会和最终答案重复的等待气泡；只有明确的
   //“刷新/重新核对”长任务才使用慢任务确认机制。
   const enterpriseDeferredWorkRequested = enterpriseRefreshRequested;
@@ -1125,9 +1100,8 @@ async function processUserTurn({ companion, binding, ctx, botId, fromUser, conte
     let agencyContinuation = null;
     if (['shadow', 'enabled'].includes(agencyRuntimeMode)) {
       try {
-        agencyContinuation = chooseAgencyContinuation(
-          listAgencyIntentions({ accountId: binding.account_id, companionId: companion.id, states: ['waiting_user', 'active'], limit: 3 }),
-          { userText, route: enterpriseTurn.route },
+        agencyContinuation = enterpriseTurn.agencyConcern || selectCurrentAgencyConcern(
+          listAgencyIntentions({ accountId: binding.account_id, companionId: companion.id, states: ['candidate', 'preparing', 'ready', 'waiting_user', 'active'], limit: 3 }),
         );
         if (agencyContinuation) {
           systemPrompt += `\n\n【统一动念·续接】当前存在一个仍在推进的${agencyContinuation.domain === 'work' ? '工作' : '关系'}动念：${agencyContinuation.desiredChange || agencyContinuation.desired_change}。先判断用户这句话是否回答、修正或改变了它；若是，接住并推进下一步；若用户明确换题，先回答新题，但不要假装旧动念已完成。不要重复索取已给出的信息，不要透露内部状态。`;
@@ -1647,9 +1621,8 @@ async function postProcess(companion, userMsg, botReply, enterpriseTurn = null, 
   const agencyRuntimeMode = String(process.env.XIYU_AGENCY_MODE || 'legacy').toLowerCase();
   if (['shadow', 'enabled'].includes(agencyRuntimeMode)) {
     try {
-      const pendingIntention = chooseAgencyContinuation(
-        listAgencyIntentions({ accountId: enterpriseTurn.accountId, companionId: companion.id, states: ['waiting_user', 'active'], limit: 3 }),
-        { userText: userMsg, route: enterpriseTurn?.route || null },
+      const pendingIntention = enterpriseTurn?.agencyConcern || selectCurrentAgencyConcern(
+        listAgencyIntentions({ accountId: enterpriseTurn.accountId, companionId: companion.id, states: ['candidate', 'preparing', 'ready', 'waiting_user', 'active'], limit: 3 }),
       );
       if (pendingIntention) {
         const feedbackContext = normalizeContextSnapshot({

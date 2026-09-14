@@ -20,24 +20,25 @@ const event = {
   actorId: 'account-1', scope: { projectId: 'yuanqu-vr', venueIds: ['ZHONGYING'] }, status: 'pending'
 };
 const calls = [];
+const jsonResponse = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } });
 globalThis.fetch = async (url, options = {}) => {
   calls.push({ url: String(url), method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
   if (String(url).endsWith('/api/knowledge/catalog')) {
-    return new Response(JSON.stringify({ ok: true, catalog: { project: { id: 'yuanqu-vr' }, venues: [{ id: 'ZHONGYING', name: '中影' }], nodes: [] } }), { status: 200 });
+    return jsonResponse({ ok: true, catalog: { project: { id: 'yuanqu-vr' }, venues: [{ id: 'ZHONGYING', name: '中影' }], nodes: [] } });
   }
   if (String(url).endsWith('/api/intelligence/events/refresh')) {
-    return new Response(JSON.stringify({ ok: true, created: [event] }), { status: 200 });
+    return jsonResponse({ ok: true, created: [event] });
   }
   if (String(url).includes('/api/intelligence/events?')) {
-    return new Response(JSON.stringify({ ok: true, items: [event] }), { status: 200 });
+    return jsonResponse({ ok: true, items: [event] });
   }
   if (String(url).includes('/api/intelligence/events/event-smoke-1')) {
-    return new Response(JSON.stringify({ ok: true, event: { ...event, status: 'delivered' } }), { status: 200 });
+    return jsonResponse({ ok: true, event: { ...event, status: 'delivered' } });
   }
   if (String(url).endsWith('/api/knowledge/retrieve')) {
-    return new Response(JSON.stringify({ ok: true, context: { contextVersion: 'enterprise-context-v1', items: [{ id: 'fact:tech-museum', assetType: 'operating_fact', epistemicStatus: 'confirmed_operating_fact', title: '科技馆客流', summary: '中影店科技馆客流回落。' }], boundaries: [], missingInformation: ['具体影响时段'], fingerprint: 'smoke' } }), { status: 200 });
+    return jsonResponse({ ok: true, context: { contextVersion: 'enterprise-context-v1', items: [{ id: 'fact:tech-museum', assetType: 'operating_fact', epistemicStatus: 'confirmed_operating_fact', title: '科技馆客流', summary: '中影店科技馆客流回落。' }], boundaries: [], missingInformation: ['具体影响时段'], fingerprint: 'smoke' } });
   }
-  return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  return jsonResponse({ ok: true });
 };
 
 const {

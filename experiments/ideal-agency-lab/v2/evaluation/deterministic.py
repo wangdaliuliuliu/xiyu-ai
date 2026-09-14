@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Callable
 
 from adapters.local import LocalAdapters
-from controller.gateway import ScriptedGateway
+from controller.gateway import ProviderResponse, ScriptedGateway
 from evaluation.harness import VALID_DECISION, _event
 from runtime.context import ContextBuilder
 from runtime.loop import AgencyLoop
@@ -51,6 +51,9 @@ class DeterministicSuite:
         self._run("partial receipt persists across restart", self.partial_restart)
         self._run("lease prevents concurrent processing", self.concurrent_lease)
         self._run("old version cannot deliver after new input", self.version_conflict)
+        self._run("duplicate event is idempotent", self.duplicate_event)
+        self._run("provider retry is bounded and traced", self.provider_retry)
+        self._run("permanent provider error is not retried", self.permanent_provider_error)
         passed = sum(item["status"] == "passed" for item in self.results)
         return {"schemaVersion": "e2-deterministic-v2", "status": "passed" if passed == len(self.results) else "failed", "passed": passed, "total": len(self.results), "results": self.results}
 
@@ -58,6 +61,15 @@ class DeterministicSuite:
         loop, store, gateway = self._loop([VALID_DECISION], suffix="direct")
         result = loop.process_event(_event("e2-direct")); assert result["status"] == "delivered" and len(gateway.calls) == 1
         assert store.conn.execute("SELECT state FROM actions").fetchone()[0] == "delivered"; store.close()
+        trace_path = next((self.run_root / "e2-trajectories").glob("direct-*/traces/trace.jsonl"))
+        traces = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        required = {"entry_kind", "callsite", "event_version", "intention_id", "action_id", "path_id", "branch_reason_ref"}
+        assert all(required.issubset(item) for item in traces)
+        assignment = next(item for item in traces if item.get("kind") == "path_assignment")
+        assert assignment["path_id"] == "P03" and assignment["branch_reason_ref"] == "sink.all_segments_delivered"
+        sink_path = next((self.run_root / "e2-trajectories").glob("direct-*/traces/sink.jsonl"))
+        sink_item = json.loads(sink_path.read_text(encoding="utf-8").splitlines()[0])
+        assert sink_item["attempt"]["trace_context"]["event_id"] == "e2-direct"
 
     def tool_continuation(self):
         loop, store, gateway = self._loop([_tool_decision(), VALID_DECISION], suffix="tool")
@@ -89,3 +101,25 @@ class DeterministicSuite:
         except PolicyError: store.close(); return
         store.close(); raise AssertionError("stale action remained deliverable")
 
+    def duplicate_event(self):
+        loop, store, gateway = self._loop([VALID_DECISION], suffix="duplicate")
+        event = _event("e2-duplicate")
+        first = loop.process_event(event); second = loop.process_event(event)
+        assert first["status"] == "delivered" and second["status"] == "duplicate" and len(gateway.calls) == 1
+        assert store.conn.execute("SELECT COUNT(*) FROM events WHERE event_id=?", (event["event_id"],)).fetchone()[0] == 1
+        store.close()
+
+    def provider_retry(self):
+        loop, store, gateway = self._loop([ProviderResponse("retry-1", "deterministic-injected", {}, finish_reason="error", error="timeout"), VALID_DECISION], suffix="retry")
+        result = loop.process_event(_event("e2-retry"))
+        assert result["status"] == "delivered" and len(gateway.calls) == 2
+        assert store.conn.execute("SELECT infra_retries FROM budgets WHERE owner='owner-a'").fetchone()[0] == 1
+        assert len(list((self.run_root / "e2-trajectories").glob("retry-*/traces/raw-responses/*.json"))) == 2
+        store.close()
+
+    def permanent_provider_error(self):
+        loop, store, gateway = self._loop([ProviderResponse("auth-1", "deterministic-injected", {}, finish_reason="error", error="http_401")], suffix="permanent-error")
+        result = loop.process_event(_event("e2-permanent-error"))
+        assert result["status"] == "infra_failure" and len(gateway.calls) == 1
+        assert store.conn.execute("SELECT infra_retries FROM budgets WHERE owner='owner-a'").fetchone()[0] == 0
+        store.close()

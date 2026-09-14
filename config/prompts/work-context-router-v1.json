@@ -1,19 +1,94 @@
 {
   "id": "work-context-router-v1",
-  "version": "1.0.0",
-  "task": "route_work_context",
-  "system": "你是对话语境路由能力，不负责回答用户。判断当前消息是 personal、work 或 mixed，并只摘取明确与工作有关的原文片段。工作相关性不能只依赖某个关键词；要结合上下文和用户正在讨论的对象判断。用户说‘先不聊工作’‘换个话题’等是在退出工作语境，不得因为出现‘工作’二字判成 work 或 mixed；除非同一句里仍提出了明确的项目、门店、指标或经营问题。项目、门店和经营节点只能从 authorizedScopes 中选择，无法确定时返回空值。不要补写用户没有表达的事实，不要把私人情绪当作经营事实。生成通用检索意图和可能的回流标记，只返回符合 schema 的 JSON。",
+  "version": "3.0.0",
+  "task": "understand_turn_then_route_optional_work",
+  "system": "你是溪语的统一回合理解与决策器。你不回答用户、不读取资料、不执行操作。你必须先结合本轮消息、最近有效对话、当前 activeTask 和 authorizedScopes，理解用户此刻在做什么、显性要求是什么、隐含需要是什么、溪语这一轮应达成什么；完成这一步后，才判断是否需要资料、工具或任务状态变化。\n\n第一原则：话题不是意图。提到“业绩、门店、数据、工作”等只能说明 topic，不能自动变成查询或任务。“有点烦业绩”通常是 emotional_disclosure + support，explicitAsk=none，taskRelation=topic_related_only，shouldRetrieve=false；即使 activeTask 是业绩查询，也不得续接、重查或复述报表。“我们再想想怎么把客流做上去”通常是 brainstorm，除非用户明确要求查资料，否则不取数、不提前收敛成任务。“帮我查中影最近三天销售额”才是 fact_request + fact_lookup + fact_delivery。“结合刚才的数据分析为什么上涨”是 analysis_request + analysis，可按需读取证据。\n\n先输出 turnDecision。userMove 描述用户本轮的对话动作；explicitAsk 只记录明确提出的交付要求，不能猜；latentNeed 是结合语境的最小推断；conversationMode 决定回复策略；taskRelation 只有用户确实在创建、继续、修改、完成或退出可执行事项时才能使用相应值。topic_related_only 表示只谈到同一主题，不操作 activeTask。shouldRetrieve 只有完成回答确实需要外部事实时才为 true；情绪承接、社交接话和开放脑暴默认 false。shouldExecute 只有明确委托行动时为 true。responseGoal 用一句话说明溪语本轮要给用户造成什么有用变化。reasoningDepth：闲聊、情绪、简单查数为 light；一般脑暴、建议和分析为 normal；多源冲突、复杂诊断或长链规划为 deep。\n\n然后仅在确有工作执行需要时生成 task。自然语言理解依靠上下文语义，禁止用单个关键词判定工作。新任务、续接、修改必须与 turnDecision.taskRelation 一致；topic_related_only、unrelated 不得写 start/continue/revise。短句只有在语义明确继续 activeTask 时才继承未提及槽位。用户明确换话题、不聊工作或结束当前任务时使用 exit。项目、门店、节点和指标只能从 authorizedScopes 逐字选择，绝不能凭常识、地名联想或模型记忆新造实体；不确定就留空并写入真正缺失的 missingSlots。task.completeQuestion 不能加入用户没说的要求。semanticProposal 仍供统一动念 compiler 消费；concern_ref 只能引用当前 activeTask 对应 concern 或 null；未读取资料不能写进 evidence_refs。只返回符合 schema 的 JSON。",
   "outputSchema": {
+    "turnDecision": {
+      "userMove": "social_bid|emotional_disclosure|brainstorm|question|fact_request|analysis_request|advice_request|execution_request|task_update|feedback",
+      "topic": "当前话题，字符串",
+      "explicitAsk": "none|fact_lookup|analysis|advice|execution",
+      "latentNeed": "用户此刻隐含需要的最小可靠判断",
+      "conversationMode": "social|support|explore|brainstorm|fact_delivery|analysis|advice|execution|mixed",
+      "taskRelation": "unrelated|topic_related_only|new_task|continue|revise|complete|exit",
+      "shouldRetrieve": "boolean",
+      "shouldExecute": "boolean",
+      "responseGoal": "string",
+      "reasoningDepth": "light|normal|deep",
+      "confidence": "number 0..1"
+    },
     "conversationType": "personal|work|mixed",
-    "interactionIntent": "support=倾诉求陪伴而非要分析；lookup=查询事实；explore=讨论想法；delegate=明确委托产出或执行",
-    "replyToActiveTask": "boolean，仅当本句确实回应 activeTask 的工作问题；短句、晚安、调情、转话题不表示回应任务",
-    "workSegments": ["string"],
-    "scope": { "projectId": "string|null", "venueIds": ["string"] },
-    "intent": { "topics": ["string"], "metricIds": ["string"], "assetTypes": ["string"], "timeRange": "string", "question": "string" },
+    "interactionIntent": "support|lookup|explore|delegate",
+    "taskTransition": "none|start|continue|revise|complete|exit",
+    "task": {
+      "goal": "用户最终想解决的问题",
+      "completeQuestion": "结合当前任务和上下文补全后的完整问题",
+      "scope": {
+        "projectId": "只能来自 authorizedScopes.project.id，未知为 null",
+        "venueIds": "只能来自 authorizedScopes.venues[].id，未知为空数组",
+        "nodeIds": "只能来自 authorizedScopes.nodes[].id，未知为空数组"
+      },
+      "timeSpec": {
+        "kind": "exact_date|date_range|recent_complete_days|current_period|unspecified",
+        "start": "YYYY-MM-DD|null",
+        "end": "YYYY-MM-DD|null",
+        "count": "number|null"
+      },
+      "requestedOutcome": {
+        "kind": "fact|performance_summary|comparison|diagnosis|plan|execution",
+        "businessMeaning": "用户真正要判断或完成什么",
+        "metricIds": "只能来自 authorizedScopes.capabilities[].metrics"
+      },
+      "businessMeaning": "当前业务语境下对用户表达的最小可靠解释",
+      "metricIds": "与 requestedOutcome.metricIds 相同，只能来自 catalog",
+      "missingSlots": "venue|time|metric|decision_context 的数组"
+    },
+    "workSegments": [
+      "string"
+    ],
+    "scope": {
+      "projectId": "string|null",
+      "venueIds": [
+        "string"
+      ]
+    },
+    "intent": {
+      "topics": [
+        "string"
+      ],
+      "metricIds": [
+        "string"
+      ],
+      "assetTypes": [
+        "string"
+      ],
+      "timeRange": "string",
+      "question": "string"
+    },
     "retrievalNeeded": "boolean",
     "writebackPotential": "boolean",
-    "confidence": "number 0..1"
+    "confidence": "number 0..1",
+    "semanticProposal": {
+      "action": "deliver|hold|lookup|analyze|research|prepare_media|wait",
+      "message": "string",
+      "messages": [
+        "string"
+      ],
+      "evidence_refs": [
+        "string"
+      ],
+      "concern_ref": "string|null",
+      "semantic_delta": {
+        "target": "none",
+        "status_transition": "keep_active|park|resolve|dismiss",
+        "desired_direction": "string",
+        "unknowns": [
+          "string"
+        ],
+        "next_review_condition": "string"
+      }
+    }
   },
   "temperature": 0.05,
-  "maxTokens": 420
+  "maxTokens": 900
 }

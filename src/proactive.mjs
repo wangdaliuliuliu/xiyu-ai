@@ -24,7 +24,7 @@ import {
   getEnterpriseProactivePolicy, markEnterpriseProactiveActivity,
   getProactiveRuntimeSchedule, saveProactiveRuntimeSchedule,
   createAgencyIntention, getAgencyIntention, findAgencyIntentionBySemanticKey,
-  updateAgencyIntention, createAgencyAction, updateAgencyAction, listAgencyIntentions, listAgencyActions, listAgencyFeedback, recordAgencyFeedback,
+  updateAgencyIntention, createAgencyAction, updateAgencyAction, listAgencyIntentions, listAgencyActions, listAgencyFeedback, recordAgencyFeedback, recordAgencyConcernEvent,
   reserveAgencyBudget, settleAgencyBudget,
   acquireAgencyLease, beginAgencyCognition, releaseAgencyLease, commitAgencyReceipt,
 } from './db.mjs';
@@ -41,7 +41,7 @@ import {
 } from './proactive_material.mjs';
 import { canAcceptConfession } from './memory.mjs';
 import { buildSystemPrompt } from './companion.mjs';
-import { pullEnterpriseEvents, acknowledgeEnterpriseEvent, rememberActiveEnterpriseTask, enterpriseProactiveEnabled, buildEnterpriseProactivePrompt, enterpriseProactiveReplyIssue } from './enterprise_context.mjs';
+import { pullEnterpriseEvents, acknowledgeEnterpriseEvent, rememberActiveEnterpriseTask, enterpriseProactiveEnabled, buildEnterpriseProactivePrompt, enterpriseProactiveReplyIssue, getEnterpriseCatalog, retrieveEnterpriseResult, researchEnterpriseSources } from './enterprise_context.mjs';
 import { generateReply, extractStructuredInfoDetailed } from './ai.mjs';
 import { sendTextMessage, sendMessageItem, recallContextToken, peekSendQuota } from './ilink.mjs';
 import { dedupSegments, isSemanticallySimilar } from './text_similarity.mjs';
@@ -63,9 +63,10 @@ import { buildShapingPromptHint } from './shaping.mjs';
 import { evaluateProactive, recordProactiveSent } from './proactive_engine.mjs';
 import { buildInitiativeDecision, selectProactiveLifeEvidence, initiativePrompt, initiativeReplyIssue, appendInitiativeReceipt } from './initiative.mjs';
 import {
-  normalizeContextSnapshot, buildAgencyAppraisalPrompt, buildAgencyPlanPrompt,
+  normalizeContextSnapshot, buildAgencyAppraisalPrompt, buildAgencyPlanPrompt, buildAgencyContinuationPrompt,
   parseStructuredJson, validateAppraisalProposal, validatePlanProposal,
-  buildSemanticKey, decisionFeatures, buildAgencyReviewPrompt, validateReviewProposal, applyOpportunityFloor, applyPlanPolicy,
+  decisionFeatures, buildAgencyReviewPrompt, validateReviewProposal, applyOpportunityFloor, applyPlanPolicy,
+  getAgencyPromptBinding, compactAgencyResultRefs, mergeAgencyEvidenceRefs, buildAgencyContinuityKey,
 } from './agency_protocol.mjs';
 import { bumpProactiveHealth, recordTickHeartbeat } from './proactive_health.mjs';   // #263 误报修：三桶健康计数 + tick 心跳
 import { getArcProactivePolicy, getArcExpressionContext, buildOliveBranchHint, markOliveBranchSent } from './relationship_arc_runtime.mjs';
@@ -223,6 +224,79 @@ function agencyMode(mode = process.env.XIYU_AGENCY_MODE || AGENCY_MODE.LEGACY) {
   return Object.values(AGENCY_MODE).includes(normalized) ? normalized : AGENCY_MODE.LEGACY;
 }
 
+async function executeDefaultAgencyLookup({ action, intention, decision, snapshot, owner }) {
+  const event = snapshot?.businessContext || decision?.enterpriseEvent || null;
+  const queryText = String(event?.question || event?.statement || action?.strategySummary || intention?.desiredChange || '').trim();
+  if (!queryText) return { status: 'unsupported', cause: 'lookup_query_missing' };
+  const catalog = await getEnterpriseCatalog({ force: false });
+  if (!catalog) return { status: 'unavailable', cause: 'enterprise_catalog_unavailable' };
+  const evidencePeriod = event?.evidencePeriod || {};
+  const timeRange = String(evidencePeriod.date || evidencePeriod.periodEnd || evidencePeriod.periodStart || '').trim();
+  const timeSpec = event?.timeSpec || (evidencePeriod.date
+    ? { kind: 'exact_date', start: evidencePeriod.date, end: evidencePeriod.date }
+    : evidencePeriod.periodStart || evidencePeriod.periodEnd
+      ? { kind: 'date_range', start: evidencePeriod.periodStart || evidencePeriod.periodEnd, end: evidencePeriod.periodEnd || evidencePeriod.periodStart }
+      : null);
+  const scope = {
+    projectId: event?.scope?.projectId || catalog?.project?.id || '',
+    venueIds: Array.isArray(event?.scope?.venueIds) ? event.scope.venueIds : [],
+    venueNames: Array.isArray(event?.scope?.venueNames) ? event.scope.venueNames : [],
+  };
+  const metricIds = Array.isArray(event?.metricIds) ? event.metricIds : [];
+  const route = {
+    conversationType: 'work', interactionIntent: 'lookup', retrievalNeeded: true,
+    workSegments: [queryText],
+    scope,
+    task: {
+      goal: queryText,
+      completeQuestion: queryText,
+      scope,
+      ...(timeSpec ? { timeSpec } : {}),
+      requestedOutcome: { kind: event?.requestedOutcome?.kind || 'performance_summary', businessMeaning: event?.businessMeaning || queryText, metricIds },
+      businessMeaning: event?.businessMeaning || queryText,
+      metricIds,
+      missingSlots: [],
+    },
+    intent: {
+      topics: Array.isArray(event?.topics) ? event.topics : [],
+      metricIds,
+      assetTypes: Array.isArray(event?.assetTypes) ? event.assetTypes : [],
+      timeRange,
+      question: queryText,
+      text: queryText,
+    },
+  };
+  const result = await retrieveEnterpriseResult(route, { accountId: owner.accountId, catalog });
+  const items = Array.isArray(result?.context?.items) ? result.context.items.slice(0, 8) : [];
+  const resultRefs = items.map(item => ({
+    kind: 'enterprise_knowledge',
+    status: item?.epistemicStatus || result.status,
+    id: item?.id || null,
+    title: item?.title || null,
+    summary: item?.summary || null,
+    refs: item?.refs || null,
+    asOf: result?.asOf || null,
+  }));
+  if (!resultRefs.length) resultRefs.push({ kind: 'enterprise_knowledge', status: result?.status || 'not_found', cause: result?.cause || null, query: queryText, asOf: result?.asOf || null });
+  return {
+    status: result?.status === 'complete' && items.length ? 'complete' : result?.status || 'unavailable',
+    cause: result?.cause || (items.length ? null : 'enterprise_knowledge_not_found'),
+    resultRefs,
+    sourceRefs: items.flatMap(item => Array.isArray(item?.refs) ? item.refs : [item?.id]).filter(Boolean).slice(0, 20),
+  };
+}
+
+async function executeDefaultAgencyResearch({ action, intention, decision, snapshot }) {
+  const event = snapshot?.businessContext || decision?.enterpriseEvent || null;
+  const query = String(event?.researchQuery || event?.question || action?.strategySummary || intention?.desiredChange || '').trim();
+  return researchEnterpriseSources({
+    query,
+    scope: event?.scope?.projectId || 'project',
+    venue: event?.scope?.venueNames?.[0] || 'all',
+    limit: 6,
+  });
+}
+
 export async function runAgencyCycle({
   accountId,
   companionId,
@@ -243,6 +317,13 @@ export async function runAgencyCycle({
   if (!Number.isInteger(owner.accountId) || owner.accountId <= 0 || !Number.isInteger(owner.companionId) || owner.companionId <= 0) {
     return { status: 'inconclusive', mode: currentMode, calls: 0, error: 'invalid_owner' };
   }
+  let promptBinding;
+  try { promptBinding = getAgencyPromptBinding(); }
+  catch (error) {
+    return { status: 'inconclusive', mode: currentMode, calls: 0, error: String(error.message || error) };
+  }
+  log('info', `[Agency] prompt=${promptBinding.promptVersion} sha256=${promptBinding.sha256.slice(0, 12)}`);
+  const promptRef = `prompt:${promptBinding.promptVersion}:${promptBinding.sha256.slice(0, 16)}`;
   const extract = deps.extractStructuredInfoDetailed || extractStructuredInfoDetailed;
   const now = deps.now ? new Date(deps.now) : new Date();
   let runtimeLease = null;
@@ -267,7 +348,17 @@ export async function runAgencyCycle({
   }
   const currentIntentions = snapshot.activeIntentions || listAgencyIntentions({ ...owner, states: ['candidate', 'preparing', 'ready', 'waiting_user', 'active'], limit: 8 });
   const currentFeedback = snapshot.recentFeedback || listAgencyFeedback({ ...owner, limit: 12 });
-  const context = normalizeContextSnapshot({ ...snapshot, now: now.toISOString(), trigger, companion, currentDecision: decision, activeIntentions: currentIntentions, recentFeedback: currentFeedback });
+  const responsibilities = [
+    ...(Array.isArray(snapshot.responsibilities) ? snapshot.responsibilities : []),
+    ...(decision?.enterpriseEvent ? [{ kind: 'enterprise_event', id: decision.enterpriseEvent.id || null, taskType: decision.enterpriseEvent.taskType || '', due: true, statement: decision.enterpriseEvent.statement || '' }] : []),
+    ...(trigger === 'reminder' ? [{ kind: 'relationship_reminder', due: true }] : []),
+  ];
+  const context = normalizeContextSnapshot({
+    ...snapshot, now: now.toISOString(), trigger, companion, currentDecision: decision,
+    activeIntentions: currentIntentions.slice(0, 6),
+    concernCatalog: currentIntentions.slice(6).map(item => ({ id: item.id, domain: item.domain, state: item.state, desiredChange: item.desiredChange, reconsiderAfter: item.reconsiderAfter })),
+    responsibilities, recentFeedback: currentFeedback,
+  });
   if (runtimeLease) {
     const effectiveSourceVersion = String(sourceVersion || snapshot.sourceVersion || snapshot.version || JSON.stringify({ trigger, evidence: snapshot.evidence || [], businessContext: snapshot.businessContext || null }));
     const cognitionStarted = beginAgencyCognition({
@@ -302,8 +393,12 @@ export async function runAgencyCycle({
   if (!appraisal.shouldAct) {
     return { status: 'no_opportunity', mode: currentMode, calls, features, appraisal, appraisalMeta: detailedAppraisal, latencyMs: Date.now() - startedAt };
   }
-  const semanticKey = buildSemanticKey(appraisal);
-  let intention = findAgencyIntentionBySemanticKey({ ...owner, semanticKey });
+  const semanticKey = buildAgencyContinuityKey(appraisal, decision || {});
+  const businessTaskRef = decision?.enterpriseEvent?.id || decision?.sourceRefs?.[0] || null;
+  let intention = businessTaskRef
+    ? currentIntentions.find(item => item.linkedBusinessTaskRef === businessTaskRef) || null
+    : null;
+  intention ||= findAgencyIntentionBySemanticKey({ ...owner, semanticKey });
   if (!intention) {
     intention = createAgencyIntention({
       ...owner,
@@ -311,19 +406,20 @@ export async function runAgencyCycle({
       domain: appraisal.domain,
       desiredChange: appraisal.desiredChange,
       appraisalSummary: appraisal.appraisalSummary,
-      basisRefs: appraisal.basisRefs,
+      basisRefs: mergeAgencyEvidenceRefs(appraisal.basisRefs, [promptRef]),
       semanticKey,
       state: 'preparing',
       priorityClass: appraisal.priorityClass,
       reconsiderAfter: new Date(now.getTime() + appraisal.reconsiderAfterMinutes * 60_000).toISOString(),
-      linkedBusinessTaskRef: decision?.enterpriseEvent?.id || null,
+      linkedBusinessTaskRef: businessTaskRef,
     });
   } else if (intention.state !== 'preparing') {
-    const reprised = updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'preparing', appraisalSummary: appraisal.appraisalSummary, basisRefs: appraisal.basisRefs, priorityClass: appraisal.priorityClass });
+    const reprised = updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'preparing', appraisalSummary: appraisal.appraisalSummary, basisRefs: mergeAgencyEvidenceRefs(intention.basisRefs, [...appraisal.basisRefs, promptRef]), priorityClass: appraisal.priorityClass });
     if (!reprised) return { status: 'inconclusive', mode: currentMode, calls, features, appraisal, error: 'intention_cas_conflict' };
     intention = reprised;
   }
   if (!intention) return { status: 'inconclusive', mode: currentMode, calls, features, appraisal, error: 'intention_persist_failed' };
+  recordAgencyConcernEvent({ ...owner, intentionId: intention.id, eventKind: 'appraised', sourceRefs: appraisal.basisRefs, payload: { trigger, shouldAct: appraisal.shouldAct, domain: appraisal.domain, desiredChange: appraisal.desiredChange, responsibilityCount: responsibilities.length }, expectedVersion: intention.version });
 
   const planContext = { ...context, currentDecision: decision, activeIntentions: [intention] };
   const planBudget = reserveAgencyBudget({ ...owner, purpose: 'plan', inputTokens: 3200, outputTokens: 600, attempts: 2, now: now.getTime() });
@@ -335,7 +431,7 @@ export async function runAgencyCycle({
     accountId: owner.accountId, companionId: owner.companionId, maxTokens: 600, temperature: 0.1, retryLimit: 1,
   });
   settleAgencyBudget({ ...owner, id: planBudget.id, usage: detailedPlan?.usage || null });
-  const totalCalls = calls + 1;
+  let totalCalls = calls + 1;
   if (!detailedPlan?.ok || detailedPlan.fallback) {
     updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'suspended' });
     return { status: 'inconclusive', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention, planMeta: detailedPlan || null, error: 'plan_provider_failure' };
@@ -346,7 +442,7 @@ export async function runAgencyCycle({
     updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'suspended' });
     return { status: 'inconclusive', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention, error: planValidation.reason };
   }
-  const plan = applyPlanPolicy(planValidation.value, { snapshot: planContext, appraisal });
+  let plan = applyPlanPolicy(planValidation.value, { snapshot: planContext, appraisal });
   let action = createAgencyAction({
     intentionId: intention.id,
     ...owner,
@@ -359,6 +455,7 @@ export async function runAgencyCycle({
     updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'suspended', resumeEvidence: [{ reason: 'action_persist_failed' }] });
     return { status: 'inconclusive', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention, plan, error: 'action_persist_failed' };
   }
+  recordAgencyConcernEvent({ ...owner, intentionId: intention.id, actionId: action.id, eventKind: 'planned', sourceRefs: plan.inputRefs, payload: { actionType: plan.actionType, shouldContact: plan.shouldContact, strategySummary: plan.strategySummary }, expectedVersion: intention.version });
   // 准备类动作必须真正执行，不能留下 planned 伪结果。contact_* 由下方
   // 原发送器接管；其余动作统一走可注入适配器并留下结果/故障回执。
   if (action && ['lookup', 'analyze', 'research', 'prepare_media', 'wait'].includes(action.actionType)) {
@@ -371,24 +468,24 @@ export async function runAgencyCycle({
     let execution;
     try {
       const adapter = action.actionType === 'lookup'
-        ? deps.executeLookup || deps.enterpriseAdapter?.retrieve
+        ? deps.executeLookup || deps.enterpriseAdapter?.retrieve || executeDefaultAgencyLookup
         : action.actionType === 'analyze'
           ? deps.executeAnalyze || deps.analysisAdapter?.analyze
-          : action.actionType === 'research'
-            ? deps.executeResearch || deps.researchAdapter?.research
+            : action.actionType === 'research'
+              ? deps.executeResearch || deps.researchAdapter?.research || executeDefaultAgencyResearch
             : action.actionType === 'prepare_media'
               ? deps.executePrepareMedia || deps.prepareMedia || deps.mediaAdapter?.prepare
               : null;
       execution = action.actionType === 'wait'
         ? { status: 'complete', resultRefs: [{ kind: 'wait', status: 'complete' }] }
         : typeof adapter === 'function'
-          ? await adapter({ action, intention, decision, snapshot: planContext })
+          ? await adapter({ action, intention, decision, snapshot: planContext, owner })
           : { status: 'unavailable', cause: `${action.actionType}_adapter_not_supplied` };
     } catch (error) {
       execution = { status: 'unavailable', cause: 'adapter_exception', error: String(error.message || error).slice(0, 200) };
     }
     const normalizedStatus = String(execution?.status || '').toLowerCase();
-    const prepared = ['complete', 'completed', 'prepared', 'success', 'ok'].includes(normalizedStatus);
+    const prepared = ['complete', 'completed', 'partial', 'prepared', 'success', 'ok'].includes(normalizedStatus);
     const refs = Array.isArray(execution?.resultRefs) && execution.resultRefs.length
       ? execution.resultRefs.slice(0, 20)
       : [{
@@ -416,6 +513,46 @@ export async function runAgencyCycle({
       const suspended = updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'suspended', resumeEvidence: [{ reason: `${action.actionType}_failed`, refs }] });
       return { status: 'infra_failure', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention: suspended || intention, plan, action, error: execution?.cause || `${action.actionType}_failed` };
     }
+    const persistedEvidence = compactAgencyResultRefs(refs, { actionType: action.actionType });
+    const evidenceUpdated = updateAgencyIntention(intention.id, {
+      ...owner,
+      expectedVersion: intention.version,
+      basisRefs: mergeAgencyEvidenceRefs(intention.basisRefs, persistedEvidence),
+      appraisalSummary: [intention.appraisalSummary, `已完成 ${action.actionType}，工具证据已写回。`].filter(Boolean).join(' ').slice(0, 2000),
+    });
+    if (!evidenceUpdated) {
+      return { status: 'inconclusive', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention, plan, action, error: 'intention_evidence_cas_conflict' };
+    }
+    intention = evidenceUpdated;
+    recordAgencyConcernEvent({ ...owner, intentionId: intention.id, actionId: action.id, eventKind: 'tool_result', sourceRefs: persistedEvidence, payload: { actionType: action.actionType, status: execution?.status || 'complete', resultCount: refs.length }, expectedVersion: intention.version });
+
+    if (action.actionType !== 'wait') {
+      const toolAction = action;
+      const continuationBudget = reserveAgencyBudget({ ...owner, purpose: 'continue', inputTokens: 2800, outputTokens: 600, attempts: 1, now: now.getTime() });
+      if (!continuationBudget) return { status: 'blocked', mode: currentMode, calls: totalCalls, intention, plan, action, error: 'agency_budget_exhausted' };
+      const detailedContinuation = await extract(
+        buildAgencyContinuationPrompt({ ...planContext, activeIntentions: [intention], evidence: mergeAgencyEvidenceRefs(planContext.evidence, persistedEvidence) }, appraisal, { action: toolAction, execution: refs }),
+        JSON.stringify({ appraisal, toolAction, toolResult: refs }),
+        { accountId: owner.accountId, companionId: owner.companionId, maxTokens: 600, temperature: 0.1, retryLimit: 0 },
+      );
+      settleAgencyBudget({ ...owner, id: continuationBudget.id, usage: detailedContinuation?.usage || null });
+      totalCalls += 1;
+      if (!detailedContinuation?.ok || detailedContinuation.fallback) return { status: 'inconclusive', mode: currentMode, calls: totalCalls, intention, plan, action, error: 'continuation_provider_failure' };
+      const parsedContinuation = parseStructuredJson(detailedContinuation.text);
+      const continuationValidation = validatePlanProposal(parsedContinuation.value, { capabilities: context.capabilities });
+      if (!continuationValidation.ok || !['contact_text', 'contact_media', 'wait'].includes(continuationValidation.value.actionType)) {
+        return { status: 'inconclusive', mode: currentMode, calls: totalCalls, intention, plan, action, error: continuationValidation.reason || 'continuation_action_invalid' };
+      }
+      plan = applyPlanPolicy(continuationValidation.value, { snapshot: { ...planContext, evidence: persistedEvidence }, appraisal });
+      if (plan.actionType === 'wait') {
+        const ready = updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'ready', reconsiderAfter: new Date(now.getTime() + plan.notBeforeMinutes * 60_000).toISOString() });
+        return { status: 'prepared', mode: currentMode, calls: totalCalls, features, appraisal, intention: ready || intention, plan, action: toolAction, promptBinding };
+      }
+      const contactAction = createAgencyAction({ intentionId: intention.id, ...owner, ...plan, dedupKey: `${plan.dedupKey}:after:${toolAction.id}`, state: 'planned', notBefore: new Date(now.getTime() + plan.notBeforeMinutes * 60_000).toISOString(), expiresAt: new Date(now.getTime() + plan.expiresAfterMinutes * 60_000).toISOString() });
+      if (!contactAction) return { status: 'inconclusive', mode: currentMode, calls: totalCalls, intention, plan, action: toolAction, error: 'continuation_action_persist_failed' };
+      action = contactAction;
+      recordAgencyConcernEvent({ ...owner, intentionId: intention.id, actionId: action.id, eventKind: 'continued_after_tool', sourceRefs: persistedEvidence, payload: { fromActionId: toolAction.id, actionType: action.actionType, strategySummary: plan.strategySummary }, expectedVersion: intention.version });
+    }
   }
   // waiting_user 只能在动作真实送达且需要用户回应后由 receipt 事务进入；
   // 当前这里只把动念推进到 ready，避免“计划存在”冒充“已送达”。
@@ -426,7 +563,7 @@ export async function runAgencyCycle({
   if (plan.shouldContact && allowContact && currentMode === AGENCY_MODE.ENABLED && typeof deps.executeContactAction === 'function') {
     await deps.executeContactAction({ action, intention: updatedIntention, decision, companion, accountId: owner.accountId });
   }
-  return { status: plan.shouldContact && allowContact && currentMode === AGENCY_MODE.ENABLED ? 'contact_ready' : 'prepared', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention: updatedIntention, plan, action, appraisalMeta: detailedAppraisal, planMeta: detailedPlan };
+  return { status: plan.shouldContact && allowContact && currentMode === AGENCY_MODE.ENABLED ? 'contact_ready' : 'prepared', mode: currentMode, calls: totalCalls, latencyMs: Date.now() - startedAt, features, appraisal, intention: updatedIntention, plan, action, appraisalMeta: detailedAppraisal, planMeta: detailedPlan, promptBinding };
   } finally {
     if (runtimeLease) {
       try { releaseAgencyLease({ ...owner, token: runtimeLease.lease_token, fencing: Number(runtimeLease.fencing) }); }
@@ -1290,6 +1427,15 @@ ${recallLoop.expected_followup ? `你心里想：${recallLoop.expected_followup}
             opts.enterpriseEvent?.statement || '',
           ].filter(Boolean),
           businessContext: opts.enterpriseEvent || null,
+          capabilities: {
+            lookup: true,
+            research: true,
+            analyze: false,
+            prepare_media: false,
+            contact_text: true,
+            contact_media: Boolean(photoOpportunity),
+          },
+          responsibilities: opts.enterpriseEvent ? [{ id: opts.enterpriseEvent.id || null, kind: opts.enterpriseEvent.taskType || 'business_event', due: true }] : [],
           constraints: { kind: effectiveKind, noOutboundDuringValidation: false },
         },
       });
@@ -1454,7 +1600,7 @@ ${recallLoop.expected_followup ? `你心里想：${recallLoop.expected_followup}
         buildAgencyReviewPrompt({
           decision: initiativeDecision,
           plan: agencyCycle.plan,
-          evidence: agencyCycle.appraisal?.basisRefs || initiativeDecision.sourceRefs || [],
+          evidence: agencyCycle.intention?.basisRefs || agencyCycle.appraisal?.basisRefs || initiativeDecision.sourceRefs || [],
           candidateText,
         }),
         JSON.stringify({ candidateText, decision: initiativeDecision, plan: agencyCycle.plan }),

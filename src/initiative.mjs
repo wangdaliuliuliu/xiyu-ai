@@ -184,7 +184,7 @@ export function initiativePrompt(decision) {
   const relationshipContract = decision.selectedCandidateType === 'relationship_opener' && !decision.sourceRefs?.length
     ? '\n关系主动的硬要求：这是她为了靠近而做的一次具体动作。必须先说一个属于她自己的选择、偏好、判断或犹豫（例如“我本来想…但…”“我决定…”“我更愿意…”），再给一个轻巧的可接话落点。禁止抽象人生感慨、节气/天气播报、报时和没有上下文的状态陈述；做不到就不要发。'
     : '';
-  return `【本次动念】\n依据：${decision.whyNow}${evidence}\n目的：${decision.objective}\n沟通策略：${decision.communicationStrategy || '给出具体内容和一个容易接住的落点'}\n表达：${decision.messageShape || '一至两条短消息'}\n完成：${decision.successCondition}\n质量契约：${decision.qualityContract || '内容本身先成立，再给一个容易接住的落点'}\n边界：${decision.requiresUserReply ? '需要明确回应' : '无需即时回应'}；只完成这个动念。事实只来自“可用事实”或已有真实上下文；可以写主观感受和观点，不补新人物、新遭遇、新细节或原文引用。没有具体话头时先形成一个真实观点或小选择，不能只发“想你、在吗、最近怎么样”。${relationshipContract}${noEvidence}失败则${decision.fallback}。不要说出内部设定。`;
+  return `【本次动念】\n依据：${decision.whyNow}${evidence}\n目的：${decision.objective}\n沟通策略：${decision.communicationStrategy || '给出具体内容和一个容易接住的落点'}\n表达：${decision.messageShape || '一至两条短消息'}\n完成：${decision.successCondition}\n质量契约：${decision.qualityContract || '内容本身先成立，再给一个容易接住的落点'}\n边界：${decision.requiresUserReply ? '需要明确回应' : '无需即时回应'}；只完成这个动念。事实只来自“可用事实”或已有真实上下文；可以写主观感受和观点，不补新人物、新遭遇、新细节或原文引用。没有具体话头时先形成一个真实观点或小选择，不能只发“想你、在吗、最近怎么样”。关系表达要口语、活泼、有主见、略带撩拨，一到两段就够；不要文艺独白、母式叮嘱，也不要用“忙不忙、累了就歇、我一直都在、突然想起你”填空。${relationshipContract}${noEvidence}失败则${decision.fallback}。不要说出内部设定。`;
 }
 
 export function initiativeReplyIssue(decision, reply, { stickers = 0, deliveryChecked = false, legacyPhraseGates = true } = {}) {
@@ -215,10 +215,12 @@ export function initiativeReplyIssue(decision, reply, { stickers = 0, deliveryCh
   if (!hasMetricValue && /(?:客单价|转化率|销售额|客流|金额).{0,10}(?:\d+(?:\.\d+)?|XX)/.test(text)) return '来源没有指标数值却补写了经营数字';
   if (decision?.lifeEvidence?.fact) {
     const fact = compact(decision.lifeEvidence.fact);
-    const detailTerms = ['窗边', '角落', '人不多', '好安静', '下雨', '下雪', '笔记', '奶奶', '妈妈', '爸爸', '同事', '外卖'];
+    const detailTerms = ['窗边', '角落', '人不多', '好安静', '下雨', '下雪', '笔记', '奶奶', '妈妈', '爸爸', '同事', '外卖', '收钱', '收银', '盘账', '值班'];
     const added = detailTerms.find(term => text.includes(term) && !fact.includes(term));
     if (added) return `日程事实外新增了细节：${added}`;
     if (/[“"][^”"]{4,}[”"]/.test(text) && !/[“"][^”"]{4,}[”"]/.test(fact)) return '日程事实外新增了原文引用';
+    if (/(?:被|让我|叫我|安排我|分去|负责|管)(?:去|来)?[^。！？!?]{0,12}(?:收钱|收银|盘账|值班|接待|统计|报表)/.test(text)
+      && !/(?:被|让我|叫我|安排我|分去|负责|管)(?:去|来)?[^。！？!?]{0,12}(?:收钱|收银|盘账|值班|接待|统计|报表)/.test(fact)) return '日程事实外新增了具体工作分工';
   }
   if (deliveryChecked && decision?.action === 'send_image_with_caption' && stickers < 1) return '计划分享图片，但没有图片投递回执';
   if (!decision?.requiresUserReply && /(?:快回我|必须回|怎么不回|你都不理我)/.test(text)) return '低负担联系变成了索取回应';
@@ -230,6 +232,21 @@ export function initiativeReplyIssue(decision, reply, { stickers = 0, deliveryCh
 
 export function buildReactiveTurnIntent({ message = '', enterpriseRoute = null } = {}) {
   const text = compact(message);
+  const decision = enterpriseRoute?.turnDecision;
+  if (decision) {
+    const objective = compact(decision.responseGoal) || compact(decision.latentNeed) || '理解用户这一刻真正需要的回应，并自然接住话头';
+    const actions = {
+      social: 'turn_toward', support: 'attune_emotion', explore: 'explore_together', brainstorm: 'brainstorm_without_premature_closure',
+      fact_delivery: 'deliver_fact', analysis: 'analyze_with_evidence', advice: 'offer_actionable_advice', execution: 'execute_or_contract', mixed: 'answer_then_connect',
+    };
+    const boundaries = {
+      social: '不强行转工作，不虚构经历', support: '先回应处境；没有明确请求时不报数、不讲课、不强行解决',
+      explore: '沿用户思路推进，不急着收敛成任务', brainstorm: '先沿他最有张力的想法推进两到四个方向，再留一个自然话头；不写成长清单，不把漫游式交流误建成执行任务',
+      fact_delivery: '直接交付可靠事实；数字、日期和来源只取自工具结果', analysis: '区分事实、推断和未知，不用报表替代判断',
+      advice: '建议必须对应用户目标和现实边界', execution: '明确执行结果、未完成项和下一步', mixed: '先满足显性请求，再自然回应情绪和关系信号',
+    };
+    return { objective, action: actions[decision.conversationMode] || 'turn_toward', boundary: boundaries[decision.conversationMode] || '只完成本轮真实意图，不因话题词自行查数或建任务', reasoningDepth: decision.reasoningDepth || 'light' };
+  }
   const type = enterpriseRoute?.conversationType || 'personal';
   if (type === 'mixed') return { objective: '先完整解决用户当前工作问题，再用一句符合关系阶段的话接住他的情绪或语气', action: 'answer_then_connect', boundary: '工作结论不能被调情打断；关系表达不另开无关话题' };
   if (type === 'work') {
