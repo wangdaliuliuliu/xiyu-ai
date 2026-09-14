@@ -41,7 +41,7 @@ import {
 } from './proactive_material.mjs';
 import { canAcceptConfession } from './memory.mjs';
 import { buildSystemPrompt } from './companion.mjs';
-import { pullEnterpriseEvents, acknowledgeEnterpriseEvent, rememberActiveEnterpriseTask, enterpriseProactiveEnabled, buildEnterpriseProactivePrompt, enterpriseProactiveReplyIssue, getEnterpriseCatalog, retrieveEnterpriseResult, researchEnterpriseSources } from './enterprise_context.mjs';
+import { pullEnterpriseEvents, acknowledgeEnterpriseEvent, rememberActiveEnterpriseTask, completeActiveEnterpriseTask, getPendingInboundEnterpriseEvent, enterpriseProactiveEnabled, buildEnterpriseProactivePrompt, enterpriseProactiveReplyIssue, getEnterpriseCatalog, retrieveEnterpriseResult, researchEnterpriseSources } from './enterprise_context.mjs';
 import { generateReply, extractStructuredInfoDetailed } from './ai.mjs';
 import { sendTextMessage, sendMessageItem, recallContextToken, peekSendQuota } from './ilink.mjs';
 import { dedupSegments, isSemanticallySimilar } from './text_similarity.mjs';
@@ -712,7 +712,13 @@ async function tick(now = new Date()) {
 
           const actorId = account.account_id || companion.user_id;
           let event = null;
-          if (['normal', 'morning'].includes(item.kind) && enterpriseProactiveEnabled()) {
+          if (['normal', 'morning'].includes(item.kind)) {
+            // Local inbound work survives restarts and gets first use of the next
+            // compliant delivery opportunity. Weekly workbench events remain the
+            // fallback; they cannot hide an already-authorized user task.
+            event = getPendingInboundEnterpriseEvent({ accountId: actorId, companionId: companion.id });
+          }
+          if (!event && ['normal', 'morning'].includes(item.kind) && enterpriseProactiveEnabled()) {
             const allowedPurposes = item.kind === 'morning' ? ['daily_report'] : ['daily_report', 'knowledge_acquisition', 'order_table_monitor'];
             event = enterpriseSupply?.events?.find(candidate => allowedPurposes.includes(candidate.taskType === 'knowledge_gap_followup' ? 'knowledge_acquisition' : candidate.taskType)) || null;
             if (!event) {
@@ -749,11 +755,15 @@ async function tick(now = new Date()) {
           // 经营资料只占用原有 normal 主动机会，不绕过不回复降频、睡眠和日配额。
           const result = await sendProactiveMessageGuarded(companion, item.kind, account, { enterpriseEvent: event, timingDecision });
           if (result === 'sent' && event) {
-            await acknowledgeEnterpriseEvent(event.id, { status: 'delivered', deliveryNote: `companion:${companion.id}` });
-            const activityPurpose = event.taskType === 'daily_report' ? 'report' : event.taskType === 'order_table_monitor' ? 'order_monitor' : 'knowledge';
-            markEnterpriseProactiveActivity(actorId, companion.id, activityPurpose, 'sent');
-            markEnterpriseProactiveActivity(actorId, companion.id, activityPurpose, 'check');
-            if (event.question) rememberActiveEnterpriseTask({ accountId: actorId, companionId: companion.id, event });
+            if (event.origin === 'inbound') {
+              completeActiveEnterpriseTask({ accountId: actorId, companionId: companion.id, taskId: event.id });
+            } else {
+              await acknowledgeEnterpriseEvent(event.id, { status: 'delivered', deliveryNote: `companion:${companion.id}` });
+              const activityPurpose = event.taskType === 'daily_report' ? 'report' : event.taskType === 'order_table_monitor' ? 'order_monitor' : 'knowledge';
+              markEnterpriseProactiveActivity(actorId, companion.id, activityPurpose, 'sent');
+              markEnterpriseProactiveActivity(actorId, companion.id, activityPurpose, 'check');
+              if (event.question) rememberActiveEnterpriseTask({ accountId: actorId, companionId: companion.id, event });
+            }
           }
           if (result === 'throttled' || result === 'inflight') {
             item._v2_deny_until = Date.now() + 10 * 60_000;   // 10 分钟后重试

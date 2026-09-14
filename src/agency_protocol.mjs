@@ -352,9 +352,26 @@ export function validatePlanProposal(raw, { maxInputRefs = 12, capabilities = nu
 
 export function applyPlanPolicy(plan, { snapshot = {}, appraisal = {} } = {}) {
   if (!plan) return plan;
-  // 计划的语义由模型与结构化能力校验共同决定。这里不用
+  const event = snapshot?.businessContext;
+  // 已授权且槽位完整的入站经营任务必须先取得来源证据。模型仍决定如何
+  // 解释和交付，但不能用 contact/wait 跳过 lookup 后声称“卡在取数”。
+  if (event?.origin === 'inbound' && event?.taskType === 'inbound_task_execution'
+      && !(event.task?.missingSlots || []).length && snapshot?.capabilities?.lookup !== false) {
+    const version = compact(event.sourceVersion || event.id || 'current').replace(/[^a-zA-Z0-9:_-]/g, '').slice(0, 80);
+    return {
+      ...plan,
+      actionType: 'lookup',
+      strategySummary: `读取已授权任务所需的实际经营来源，再沿原任务交付：${compact(event.question || event.statement).slice(0, 300)}`,
+      expectedEffect: '用可追溯的最新来源回答原经营任务',
+      inputRefs: [...new Set([...asArray(plan.inputRefs), ...asArray(event.sourceRefs), `event:${event.id}`])].slice(0, 24),
+      completionCriteria: ['实际来源查询已执行', '结果或明确来源错误已持久化', '交付不把猜测表述为经营事实'],
+      dedupKey: `inbound-lookup:${compact(event.id)}:${version}`.slice(0, 180),
+      notBeforeMinutes: 0,
+      shouldContact: false,
+    };
+  }
+  // 其他计划的语义由模型与结构化能力校验共同决定。这里不用
   // “已确认/口径/缺口”等字样重写 actionType，避免自然语言误判。
-  void snapshot;
   void appraisal;
   return plan;
 }

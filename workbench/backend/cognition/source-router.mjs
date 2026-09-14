@@ -1,7 +1,7 @@
 // Only metadata and selected facts cross the model boundary. Document contents stay here.
 export const sourceCapabilities = [
-  { id: 'channel_daily', title: '渠道日销售来源表', queries: '指定日期、门店的销售额、票数、实收额、线上线下销售额', grain: '日×门店×渠道', metrics: ['box_office_total', 'sales_order_count', 'platform_settlement', 'online_sales_amount', 'offline_sales_amount'] },
-  { id: 'daily_traffic', title: '周报辅助表·日客流', queries: '指定日期、门店的大盘客流、触达人数、转化人数', grain: '日×门店', metrics: ['venue_traffic', 'reach_count', 'conversion_count'] },
+  { id: 'channel_daily', title: '渠道日销售来源表', queries: '指定日期、门店的销售额、票数、实收额、线上线下销售额', grain: '日×门店×渠道', updateCadence: 'daily', freshnessRole: 'primary_for_recent_sales', metrics: ['box_office_total', 'sales_order_count', 'platform_settlement', 'online_sales_amount', 'offline_sales_amount'] },
+  { id: 'daily_traffic', title: '周报辅助表·日客流', queries: '指定日期、门店的大盘客流、触达人数、转化人数', grain: '日×门店', updateCadence: 'daily', freshnessRole: 'primary_for_recent_traffic', metrics: ['venue_traffic', 'reach_count', 'conversion_count'] },
 ];
 
 const PERFORMANCE_DEFAULT_METRICS = ['box_office_total', 'sales_order_count', 'venue_traffic', 'reach_count', 'conversion_count'];
@@ -23,7 +23,8 @@ const dateSpan = (start, end, max = 31) => {
 function selectVenueFromScope(input, profile) {
   const venues = Object.entries(profile.venues || {});
   const lookup = new Map(venues.flatMap(([name, venue]) => [[name, [name, venue]], [String(venue?.venueId || name), [name, venue]]]));
-  const raw = [...(input.scope?.venueIds || []), ...(input.scope?.venueNames || []), ...(input.scope?.venues || [])].map(String).filter(Boolean);
+  const scope = input.scope || input.task?.scope || input.query?.task?.scope || {};
+  const raw = [...(scope.venueIds || []), ...(scope.venueNames || []), ...(scope.venues || [])].map(String).filter(Boolean);
   const selected = [...new Map(raw.map(value => lookup.get(value)).filter(Boolean).map(pair => [pair[0], pair])).values()];
   return selected;
 }
@@ -48,11 +49,11 @@ function structuredPlan(input, profile, now) {
   else if (timeKind === 'unspecified' && kind === 'performance_summary') timeKind = 'recent_complete_days';
   if (timeKind === 'recent_complete_days') {
     const count = Math.max(1, Math.min(7, Number.isFinite(Number(time.count)) ? Math.trunc(Number(time.count)) : 3));
-    return { status: 'ready', structured: true, capabilityIds: sourceCapabilities.filter(capability => metrics.some(metric => capability.metrics.includes(metric))).map(capability => capability.id), venue, venueId: venueProfile.venueId, metrics, timeSpec: { kind: timeKind, count }, dates: null, requestedOutcome: { kind: kind || 'fact', businessMeaning: String(outcome.businessMeaning || task.businessMeaning || '') }, assumedYear: false };
+    return { status: 'ready', structured: true, capabilityIds: sourceCapabilities.filter(capability => metrics.some(metric => capability.metrics.includes(metric))).map(capability => capability.id), venue, venueId: venueProfile.venueId, metrics, timeSpec: { kind: timeKind, count }, dates: null, freshnessPolicy: 'daily_sources_before_weekly_context', requestedOutcome: { kind: kind || 'fact', businessMeaning: String(outcome.businessMeaning || task.businessMeaning || '') }, assumedYear: false };
   }
   if (!dates.length) return { status: 'clarification', reason: timeKind === 'date_range' ? '请确认有效的日期范围' : '请确认要查询的有效日期', metrics };
   const capabilityIds = sourceCapabilities.filter(capability => metrics.some(metric => capability.metrics.includes(metric))).map(capability => capability.id);
-  return { status: 'ready', structured: true, capabilityIds, capabilityId: capabilityIds[0], venue, venueId: venueProfile.venueId, date: dates.length === 1 ? dates[0] : undefined, dates, timeSpec: { kind: timeKind, start: dates[0], end: dates[dates.length - 1], count: null }, metrics, requestedOutcome: { kind: kind || 'fact', businessMeaning: String(outcome.businessMeaning || task.businessMeaning || '') }, assumedYear: false };
+  return { status: 'ready', structured: true, capabilityIds, capabilityId: capabilityIds[0], venue, venueId: venueProfile.venueId, date: dates.length === 1 ? dates[0] : undefined, dates, timeSpec: { kind: timeKind, start: dates[0], end: dates[dates.length - 1], count: null }, metrics, freshnessPolicy: ['exact_date', 'date_range', 'current_period'].includes(timeKind) ? 'daily_sources_before_weekly_context' : 'declared_sources', requestedOutcome: { kind: kind || 'fact', businessMeaning: String(outcome.businessMeaning || task.businessMeaning || '') }, assumedYear: false };
 }
 
 function legacyPlan(input, profile, now) {
@@ -84,7 +85,7 @@ function legacyPlan(input, profile, now) {
   if (unique.length !== 1 || !validDate(unique[0])) return { status: 'clarification', reason: '当前日数据查询需要一个有效的明确日期；不以周汇总替代', metrics };
   const capabilityIds = sourceCapabilities.filter(capability => metrics.some(metric => capability.metrics.includes(metric))).map(capability => capability.id);
   if (!capabilityIds.length) return { status: 'clarification', reason: '当前没有覆盖所需指标的来源', metrics };
-  return { status: 'ready', capabilityIds, capabilityId: capabilityIds[0], venue: selected[0][0], venueId: selected[0][1].venueId, date: unique[0], dates: unique, metrics, timeSpec: { kind: 'exact_date', start: unique[0], end: unique[0], count: null }, requestedOutcome: { kind: 'fact', businessMeaning: '' }, assumedYear: !/\d{4}年|\d{4}-/.test(text) };
+  return { status: 'ready', capabilityIds, capabilityId: capabilityIds[0], venue: selected[0][0], venueId: selected[0][1].venueId, date: unique[0], dates: unique, metrics, timeSpec: { kind: 'exact_date', start: unique[0], end: unique[0], count: null }, freshnessPolicy: 'daily_sources_before_weekly_context', requestedOutcome: { kind: 'fact', businessMeaning: '' }, assumedYear: !/\d{4}年|\d{4}-/.test(text) };
 }
 
 export function planSourceLookup(input, profile, now = new Date()) {

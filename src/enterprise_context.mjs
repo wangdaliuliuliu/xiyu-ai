@@ -50,6 +50,7 @@ const EXPLICIT_ASKS = new Set(['none', 'fact_lookup', 'analysis', 'advice', 'exe
 const CONVERSATION_MODES = new Set(['social', 'support', 'explore', 'brainstorm', 'fact_delivery', 'analysis', 'advice', 'execution', 'mixed']);
 const TASK_RELATIONS = new Set(['unrelated', 'topic_related_only', 'new_task', 'continue', 'revise', 'complete', 'exit']);
 const REASONING_DEPTHS = new Set(['light', 'normal', 'deep']);
+const EVIDENCE_BACKED_TASK_OUTCOMES = new Set(['fact', 'performance_summary', 'comparison', 'diagnosis', 'plan', 'execution']);
 
 function featureEnabled(name, fallback = true) {
   const value = String(process.env[name] ?? (fallback ? 'true' : 'false')).toLowerCase();
@@ -118,6 +119,22 @@ export function enterpriseTurnSummary(turn) {
     reasoningDepth: route?.turnDecision?.reasoningDepth || '',
     memoryFirewall: enterpriseMemoryFirewallEnabled(),
   };
+}
+
+// Once an authorized inbound task has a complete executable frame, a routing
+// model may shape the response but cannot silently cancel the source lookup.
+// Topic-adjacent emotional/social turns remain untouched: only a new/revised
+// task or an explicit follow-up request crosses this boundary.
+export function shouldRetrieveCompleteInboundTask({ task = null, transition = 'none', route = null } = {}) {
+  if (!task || task.origin !== 'inbound' || (task.frame?.missingSlots || task.missingSlots || []).length) return false;
+  const outcome = String(task.frame?.requestedOutcome?.kind || task.requestedOutcome?.kind || '');
+  if (!EVIDENCE_BACKED_TASK_OUTCOMES.has(outcome)) return false;
+  if (['start', 'revise'].includes(transition)) return true;
+  if (transition !== 'continue') return false;
+  const decision = route?.turnDecision || {};
+  return decision.shouldRetrieve === true
+    || (decision.explicitAsk && decision.explicitAsk !== 'none')
+    || ['fact_request', 'analysis_request', 'advice_request', 'execution_request'].includes(decision.userMove);
 }
 
 /**
@@ -1031,6 +1048,34 @@ export function getActiveEnterpriseTask({ accountId = '', companionId = '' } = {
   return task;
 }
 
+// Re-exposes an already-authorized, complete inbound task as a durable business
+// event after a restart or when its reactive turn did not finish. The event is
+// data only; the existing AgencyLoop remains the sole planner/executor.
+export function getPendingInboundEnterpriseEvent({ accountId = '', companionId = '' } = {}) {
+  const task = getActiveEnterpriseTask({ accountId, companionId });
+  if (!task || task.origin !== 'inbound' || !['ready', 'executing'].includes(task.status)) return null;
+  if ((task.frame?.missingSlots || task.missingSlots || []).length) return null;
+  const frame = task.frame || task;
+  const frameHash = crypto.createHash('sha256').update(JSON.stringify(frame)).digest('hex').slice(0, 16);
+  return {
+    id: task.taskId,
+    origin: 'inbound',
+    taskType: 'inbound_task_execution',
+    statement: task.goal || task.completeQuestion || task.question || '',
+    question: task.completeQuestion || task.question || task.goal || '',
+    goal: task.goal || '',
+    scope: task.scope || frame.scope || {},
+    timeSpec: task.timeSpec || frame.timeSpec || {},
+    requestedOutcome: task.requestedOutcome || frame.requestedOutcome || {},
+    metricIds: task.metricIds || frame.metricIds || [],
+    task: frame,
+    sourceRefs: [`task:${task.taskId}`],
+    sourceVersion: `inbound-frame:${frameHash}`,
+    freshnessPolicy: ['recent_complete_days', 'exact_date', 'date_range', 'current_period'].includes(String((task.timeSpec || frame.timeSpec || {}).kind || ''))
+      ? 'daily_sources_before_weekly_context' : 'declared_sources',
+  };
+}
+
 export function completeActiveEnterpriseTask({ accountId = '', companionId = '', taskId = '' } = {}) {
   const key = String(companionId || accountId || '').trim();
   if (!key) return false;
@@ -1408,6 +1453,7 @@ export async function prepareEnterpriseContext({ message, history = [], accountI
     route = { ...route, semanticProposal: { ...route.semanticProposal, concernRef: route.semanticProposal.concernRef || agencyConcern.id } };
   }
   if (currentTask?.origin === 'inbound' && taskTransition.transition !== 'none') {
+    const forcedTaskRetrieval = shouldRetrieveCompleteInboundTask({ task: currentTask, transition: taskTransition.transition, route });
     route = {
       ...route,
       task: currentTask.frame,
@@ -1417,9 +1463,10 @@ export async function prepareEnterpriseContext({ message, history = [], accountI
       // A semantic continuation may omit fields that are deliberately inherited
       // from the durable task. Re-evaluate retrieval after that merge rather than
       // freezing the pre-merge missing-slot result.
-      retrievalNeeded: route.turnDecision
+      retrievalNeeded: forcedTaskRetrieval || (route.turnDecision
         ? route.turnDecision.shouldRetrieve === true && !(currentTask.frame?.missingSlots || []).length
-        : route.retrievalNeeded,
+        : route.retrievalNeeded),
+      retrievalPolicy: forcedTaskRetrieval ? 'authorized_complete_task_requires_evidence' : route.retrievalPolicy,
     };
   }
   // 主动经营事件后的短回答可能只有“有，周末掉得明显”这一类片段，

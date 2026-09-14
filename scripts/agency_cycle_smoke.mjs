@@ -7,6 +7,14 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xiyu-agency-cycle-'));
 process.env.DB_PATH = path.join(root, 'bot.db');
 const { getDb, listAgencyIntentions, listAgencyFeedback, updateAgencyAction, commitAgencyReceipt, getAgencyAction } = await import('../src/db.mjs');
 const { runAgencyCycle } = await import('../src/proactive.mjs');
+const { applyPlanPolicy } = await import('../src/agency_protocol.mjs');
+
+const forcedInboundPlan = applyPlanPolicy({ actionType: 'contact_text', strategySummary: '先说正在取数', expectedEffect: '', inputRefs: [], completionCriteria: [], dedupKey: 'wrong', notBeforeMinutes: 10, expiresAfterMinutes: 120, shouldContact: true }, {
+  snapshot: { capabilities: { lookup: true }, businessContext: { id: 'inbound-task:fixture', origin: 'inbound', taskType: 'inbound_task_execution', question: '中影最近三天业绩', sourceVersion: 'inbound-frame:abc', sourceRefs: ['task:fixture'], task: { missingSlots: [] } } },
+});
+assert.equal(forcedInboundPlan.actionType, 'lookup');
+assert.equal(forcedInboundPlan.shouldContact, false);
+assert.equal(forcedInboundPlan.notBeforeMinutes, 0);
 
 const db = getDb();
 const row = db.prepare('INSERT INTO companions (user_id, bot_id, name) VALUES (NULL, ?, ?)').run('cycle-bot', '循环角色');

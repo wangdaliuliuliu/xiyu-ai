@@ -82,6 +82,20 @@ assert.equal(guarded.outputOrigin, 'deterministic_result');
 assert.match(guarded.reply, /266/);
 assert.ok(!bridge.factReplyPreservesValues('中影最近不错', factTurn.factResult));
 
+let forcedLookupCalls = 0;
+const wronglySuppressed = route('start', task(), 'work', {
+  retrievalNeeded: false,
+  turnDecision: { userMove: 'fact_request', explicitAsk: 'fact_lookup', taskRelation: 'new_task', shouldRetrieve: false },
+});
+const forcedLookup = await bridge.prepareEnterpriseContext({ message: '帮我查一下中影最近三天的业绩', accountId: 'm4-force-account', companionId: 'm4-force-companion' }, {
+  catalog,
+  route: () => wronglySuppressed,
+  retrieve: async () => { forcedLookupCalls++; return recordContext; },
+});
+assert.equal(forcedLookupCalls, 1);
+assert.equal(forcedLookup.route.retrievalNeeded, true);
+assert.equal(forcedLookup.route.retrievalPolicy, 'authorized_complete_task_requires_evidence');
+
 const notFound = await bridge.prepareEnterpriseContext({ message: '查中影的资料', accountId: 'm4-not-found', companionId: 'm4-not-found' }, { catalog, route: () => route('start', task()), retrieve: async () => ({ items: [], sourceLookup: { status: 'not_found', reason: '没有对应资料' } }) });
 assert.equal(notFound.enterpriseResult.status, 'not_found');
 assert.match(bridge.renderEnterpriseResult(notFound.enterpriseResult), /没有找到/);
