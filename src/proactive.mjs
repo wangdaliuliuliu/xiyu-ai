@@ -27,6 +27,7 @@ import {
   updateAgencyIntention, createAgencyAction, updateAgencyAction, listAgencyIntentions, listAgencyActions, listAgencyFeedback, recordAgencyFeedback, recordAgencyConcernEvent,
   reserveAgencyBudget, settleAgencyBudget,
   acquireAgencyLease, beginAgencyCognition, releaseAgencyLease, commitAgencyReceipt,
+  getAppSetting, setAppSetting,   // 2026-09-17：通道关闭连续计数（可观测性）
 } from './db.mjs';
 import { getActivePeriodContext, isPeriodHeavyWindow, isPmsActive } from './life_state.mjs';   // v1.22 PR-L3 经期情绪路由
 import { buildWorksPromptHint, worksSceneSeed, pickProactiveWork, workMaterialId, worksConfig } from './current_works.mjs';  // v1.21.4 PR-W2 表达层
@@ -126,6 +127,102 @@ const PROACTIVE_SLOT_GRACE_MINUTES = Math.max(5, Number(process.env.PROACTIVE_SL
 
 const schedules = new Map();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 送达可观测性（2026-09-17 新增）
+//
+// 起因：9-15 一整天生成了内容却一条都没发出去，而排程仍标 sent:true；
+// 9-16/9-17 预检生效后改为静默跳过。两种情况下**用户都毫无提示**，
+// 直到两天后自己发现"她没理我"。根因是"发不出去"这件事没有任何可观测出口。
+// 下面两个小工具把「连续多次机会因窗口关闭而放弃」变成计数 + 明确告警。
+// ─────────────────────────────────────────────────────────────────────────────
+const CHANNEL_CLOSED_KEY = 'proactive_channel_closed_streak';
+const CHANNEL_CLOSED_ALERT_AT = 6;   // 连续 6 次机会都发不出去（约一天多）就告警
+
+/** 记一次「因窗口关闭而放弃的机会」，达到阈值时明确告警。fail-open，绝不阻塞主流程。 */
+function noteChannelClosedSkip(companionId, kind) {
+  try {
+    const next = (Number(getAppSetting(CHANNEL_CLOSED_KEY)) || 0) + 1;
+    setAppSetting(CHANNEL_CLOSED_KEY, String(next));
+    if (next >= CHANNEL_CLOSED_ALERT_AT && (next === CHANNEL_CLOSED_ALERT_AT || next % CHANNEL_CLOSED_ALERT_AT === 0)) {
+      log('warn', `[Proactive] ⚠ 主动通道已连续 ${next} 次机会发不出去 companion=${companionId} kind=${kind}：`
+        + `微信会话窗口关闭（用户已超过 24h 未互动）。她暂时无法主动联系；用户发一条消息即可重新打开窗口。`);
+    }
+  } catch (e) {
+    log('warn', `[Proactive] 窗口关闭计数失败（已忽略）: ${e.message}`);
+  }
+}
+
+/** 真正送达一次 → 窗口显然是开的，连续计数清零。fail-open。 */
+function clearChannelClosedStreak() {
+  try {
+    setAppSetting(CHANNEL_CLOSED_KEY, '0');
+  } catch { /* 计数失败不影响发送 */ }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 生成前预检：同一动念刚被出站门拦过就不要重复生成（2026-09-17 新增）
+//
+// 动机见调用点注释。要点：
+//   - 只用**确定性**信息（动念 id + 计划去重键）做指纹，不引入任何模型调用；
+//   - 指纹变化（新动念/新计划/新证据）立即放行，绝不把角色永久锁死；
+//   - 只在"同一指纹刚刚失败过"的短时间内拦截，超过冷却窗自动放行再试一次；
+//   - 全部 fail-open：读不到记忆就当没有，正常生成。
+// ─────────────────────────────────────────────────────────────────────────────
+const PRECHECK_KEY = 'proactive_precheck_last_failure';
+const PRECHECK_COOLDOWN_MIN = 20;   // 同一指纹失败后，20 分钟内不重复生成
+
+/**
+ * 纯函数：给定「上次失败记忆」与本次指纹，判断是否该跳过生成。
+ * 抽出来是为了可离线确定性回归（没有这段，预检行为只能靠生产试错验证）。
+ * 返回 { skip, reason }。**必须在任何异常输入下 fail-open（skip=false）**。
+ */
+export function evaluatePrecheckGate(memo, { companionId, intentionId, planKey, hasEnterpriseEvent, effectiveKind, nowMs = Date.now(), cooldownMin = PRECHECK_COOLDOWN_MIN } = {}) {
+  try {
+    if (effectiveKind === 'reminder') return { skip: false, reason: 'reminder_exempt' };
+    if (hasEnterpriseEvent) return { skip: false, reason: 'enterprise_event' };
+    if (!intentionId && !planKey) return { skip: false, reason: 'no_fingerprint' };
+    if (!memo || typeof memo !== 'object') return { skip: false, reason: 'no_memory' };
+    if (Number(memo.companionId) !== Number(companionId)) return { skip: false, reason: 'other_companion' };
+    if (String(memo.intentionId || '') !== String(intentionId || '')) return { skip: false, reason: 'new_intention' };
+    if (String(memo.planKey || '') !== String(planKey || '')) return { skip: false, reason: 'new_plan' };
+    const at = Number(memo.at) || 0;
+    const ageMin = (Number(nowMs) - at) / 60_000;
+    if (!(ageMin >= 0) || ageMin > cooldownMin) return { skip: false, reason: 'cooldown_expired' };
+    return { skip: true, reason: `same_intention_${memo.reason || 'blocked'}` };
+  } catch {
+    return { skip: false, reason: 'gate_error' };
+  }
+}
+
+/** 读上次失败记忆；指纹相同且在冷却窗内 → skip。 */
+function proactivePrecheckGate(companionId, { intentionId, planKey, hasEnterpriseEvent, effectiveKind }) {
+  let memo = null;
+  try {
+    const raw = getAppSetting(PRECHECK_KEY);
+    if (raw) memo = JSON.parse(raw);
+  } catch { memo = null; }
+  return evaluatePrecheckGate(memo, { companionId, intentionId, planKey, hasEnterpriseEvent, effectiveKind });
+}
+
+/** 记下"这个动念这一版计划刚刚被拦"，供下一次生成前预检使用。fail-open。 */
+function recordPrecheckFailure(companionId, { intentionId, planKey, reason }) {
+  try {
+    if (!intentionId && !planKey) return;
+    setAppSetting(PRECHECK_KEY, JSON.stringify({
+      companionId: Number(companionId),
+      intentionId: intentionId ? String(intentionId) : null,
+      planKey: planKey ? String(planKey) : null,
+      reason: String(reason || 'blocked').slice(0, 40),
+      at: Date.now(),
+    }));
+  } catch { /* fail-open */ }
+}
+
+/** 生成成功并进入投递 → 清掉失败记忆，避免后续被误挡。fail-open。 */
+function clearPrecheckFailure() {
+  try { setAppSetting(PRECHECK_KEY, ''); } catch { /* fail-open */ }
+}
+
 function normalizePersistedRuntimeSchedule(raw, companionId, dateKey) {
   if (!raw || raw.dateKey !== dateKey || !Array.isArray(raw.items)) return null;
   const items = raw.items
@@ -134,6 +231,17 @@ function normalizePersistedRuntimeSchedule(raw, companionId, dateKey) {
       minute: Number(item.minute),
       kind: ['normal', 'morning', 'goodnight', 'photo'].includes(item.kind) ? item.kind : 'normal',
       sent: item.sent === true,
+      // 2026-09-17：投递结果必须随排程持久化，否则服务重启后就看不出
+      // 「这条时段到底送达了、还是失败了、还是过期作废」。
+      ...(typeof item.deliveryOutcome === 'string' && item.deliveryOutcome
+        ? { deliveryOutcome: item.deliveryOutcome.slice(0, 40) }
+        : {}),
+      ...(typeof item.deliveryAt === 'string' && item.deliveryAt
+        ? { deliveryAt: item.deliveryAt.slice(0, 40) }
+        : {}),
+      ...(typeof item.deliveryError === 'string' && item.deliveryError
+        ? { deliveryError: item.deliveryError.slice(0, 80) }
+        : {}),
       ...(Number.isFinite(Number(item._v2_deny_until)) && Number(item._v2_deny_until) > 0
         ? { _v2_deny_until: Number(item._v2_deny_until) }
         : {}),
@@ -371,7 +479,7 @@ export async function runAgencyCycle({
     });
     if (!cognitionStarted) return { status: 'cooldown', mode: currentMode, calls: 0, error: 'agency_cognition_not_due' };
   }
-  const appraisalBudget = reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 2400, outputTokens: 500, attempts: 2, now: now.getTime() });
+  const appraisalBudget = reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 10000, outputTokens: 800, attempts: 2, now: now.getTime() });
   if (!appraisalBudget) return { status: 'blocked', mode: currentMode, calls: 0, error: 'agency_budget_exhausted' };
   const detailedAppraisal = await extract(buildAgencyAppraisalPrompt(context), JSON.stringify(context), {
     accountId: owner.accountId, companionId: owner.companionId, maxTokens: 500, temperature: 0.1, retryLimit: 1,
@@ -422,7 +530,7 @@ export async function runAgencyCycle({
   recordAgencyConcernEvent({ ...owner, intentionId: intention.id, eventKind: 'appraised', sourceRefs: appraisal.basisRefs, payload: { trigger, shouldAct: appraisal.shouldAct, domain: appraisal.domain, desiredChange: appraisal.desiredChange, responsibilityCount: responsibilities.length }, expectedVersion: intention.version });
 
   const planContext = { ...context, currentDecision: decision, activeIntentions: [intention] };
-  const planBudget = reserveAgencyBudget({ ...owner, purpose: 'plan', inputTokens: 3200, outputTokens: 600, attempts: 2, now: now.getTime() });
+  const planBudget = reserveAgencyBudget({ ...owner, purpose: 'plan', inputTokens: 8000, outputTokens: 900, attempts: 2, now: now.getTime() });
   if (!planBudget) {
     updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'suspended', resumeEvidence: [{ reason: 'budget_exhausted' }] });
     return { status: 'blocked', mode: currentMode, calls, intention, error: 'agency_budget_exhausted' };
@@ -528,7 +636,7 @@ export async function runAgencyCycle({
 
     if (action.actionType !== 'wait') {
       const toolAction = action;
-      const continuationBudget = reserveAgencyBudget({ ...owner, purpose: 'continue', inputTokens: 2800, outputTokens: 600, attempts: 1, now: now.getTime() });
+      const continuationBudget = reserveAgencyBudget({ ...owner, purpose: 'continue', inputTokens: 7000, outputTokens: 900, attempts: 1, now: now.getTime() });
       if (!continuationBudget) return { status: 'blocked', mode: currentMode, calls: totalCalls, intention, plan, action, error: 'agency_budget_exhausted' };
       const detailedContinuation = await extract(
         buildAgencyContinuationPrompt({ ...planContext, activeIntentions: [intention], evidence: mergeAgencyEvidenceRefs(planContext.evidence, persistedEvidence) }, appraisal, { action: toolAction, execution: refs }),
@@ -704,6 +812,10 @@ async function tick(now = new Date()) {
           // 过期项明确作废并持久化，避免下一 tick 再次尝试；事件提醒/睡眠兜底走独立分支。
           if (minuteNow - item.minute > PROACTIVE_SLOT_GRACE_MINUTES) {
             item.sent = true;
+            // 2026-09-17：区分「时段已消耗」与「消息真送达」。作废必须写明 deliveryOutcome，
+            // 否则数据库里只剩 sent:true，看起来像"发过了"，掩盖了整天的真实空转。
+            item.deliveryOutcome = 'expired';
+            item.deliveryAt = new Date().toISOString();
             persistRuntimeSchedule(companion.id, schedule);
             log('info', `[Proactive] 过期时段作废 companion=${companion.id} kind=${item.kind} scheduled=${item.minute} now=${minuteNow} grace=${PROACTIVE_SLOT_GRACE_MINUTES}`);
             bumpProactiveHealth('restrained', { companionId: companion.id, reason: 'stale_slot' });
@@ -767,17 +879,40 @@ async function tick(now = new Date()) {
           }
           if (result === 'throttled' || result === 'inflight') {
             item._v2_deny_until = Date.now() + 10 * 60_000;   // 10 分钟后重试
+            item.deliveryOutcome = result === 'throttled' ? 'throttled' : 'inflight';
             bumpProactiveHealth('restrained', { companionId: companion.id, reason: result });
           } else if (result === 'safety') {
             item._v2_deny_until = Date.now() + 60 * 60_000;   // 安全门，1 小时后再评估
+            item.deliveryOutcome = 'safety_blocked';
             bumpProactiveHealth('restrained', { companionId: companion.id, reason: 'safety' });
           } else if (result === 'arc_skip') {
             item._v2_deny_until = Date.now() + 90 * 60_000;   // v1.21 冷战降频，1.5 小时后再评估
+            item.deliveryOutcome = 'arc_skipped';
             bumpProactiveHealth('restrained', { companionId: companion.id, reason: 'arc_skip' });
-          } else {
-            // 'sent' 或内部早退（撞车/无 ctx）都算今日已尝试；'sent' 桶已在
-            // recordProactiveSentTimestamp 汇聚点计（含 reminder/lastcall 等所有 kind）
+          } else if (result === 'precheck_skip') {
+            // 2026-09-17：同一动念上次已被出站门拦下、指纹未变 → 生成前就跳过。
+            // 这不是"投递失败"，不该计入 not_delivered 告警；时段照常消耗避免同 tick 反复重试。
             item.sent = true;
+            item.deliveryOutcome = 'precheck_skip';
+            item.deliveryAt = new Date().toISOString();
+          } else if (result === 'sent') {
+            // 只有真实送达才记 delivered——这是「她今天到底说没说话」的唯一可信依据。
+            item.sent = true;
+            item.deliveryOutcome = 'delivered';
+            item.deliveryAt = new Date().toISOString();
+          } else {
+            // 2026-09-17 修（原为「'sent' 或内部早退都算今日已尝试」并直接 item.sent = true）：
+            // 内部早退（撞车/'not_sent'/无 ctx 等）**并没有送达**。旧写法把它们一并标成
+            // sent:true，导致 9-15、9-16 排程显示 13 条全部"已发"，而 wechat_messages
+            // 里零条出站——状态撒谎，掩盖了整条链路的失败，也无从告警。
+            // 现在：时段照常消耗（避免同一 tick 反复重试白烧 token），但如实记为 failed，
+            // 并累计到健康计数，让「连续多日一条没发出去」变得可见。
+            item.sent = true;
+            item.deliveryOutcome = 'failed';
+            item.deliveryAt = new Date().toISOString();
+            item.deliveryError = String(result || 'unknown');
+            bumpProactiveHealth('restrained', { companionId: companion.id, reason: `not_delivered:${result || 'unknown'}` });
+            log('warn', `[Proactive] 未送达 companion=${companion.id} kind=${item.kind} reason=${result || 'unknown'}（时段已消耗，如实记为 failed）`);
           }
           persistRuntimeSchedule(companion.id, schedule);
         }
@@ -910,6 +1045,8 @@ async function sendProactiveMessageGuarded(companion, kind, account, opts = {}) 
     // 成功后记录（sendProactiveMessage 内部失败/早退也无伤大雅，下次仍会按间隔判断）
     recordProactiveSentTimestamp(companion.id, kind);
     bumpProactiveHealth('sent', { companionId: companion.id });   // #263 误报修：已发送桶（所有 kind 的发送汇聚点，与 last_proactive_sent_at 同源）
+    clearChannelClosedStreak();   // 2026-09-17：真送达一次 = 窗口是开的，连续关闭计数清零
+    clearPrecheckFailure();       // 2026-09-17：生成并投递成功 → 清掉"上次被拦"的记忆
 
     // v1.10.0 sleep 状态切换 hook
     try {
@@ -1197,6 +1334,12 @@ async function sendProactiveMessage(companion, kind, account, opts = {}) {
   // 复用 recallContextToken（24h TTL，与实测窗口吻合）：返回 null = 窗口已关，无可用 token。
   // 注：用户一旦回来发消息，token 立即刷新、窗口重开，引擎会按正常间隔重新主动。
   if (!recallContextToken(ctx.botId, companion.wechat_user_id)) {
+    // 2026-09-17 新增：把"窗口关着"累计成可观测计数。
+    // 背景：9-15 生成了一整批内容却一条都发不出去（排程仍标 sent:true），
+    // 9-16/9-17 起预检生效、直接跳过——但**完全静默**，用户两天后才发现她没理人。
+    // 这里累计「连续多少次机会因窗口关闭而放弃」，送达后清零；
+    // 超过阈值由 warnChannelClosed() 明确告警，不再藏在一行 info 里。
+    noteChannelClosedSkip(companion.id, kind);
     log('info', `[Proactive] 跳过：companion=${companion.id} kind=${kind} context_token 窗口已关闭（用户 >24h 未互动，主动消息发不出，不生成内容）`);
     return;
   }
@@ -1592,6 +1735,25 @@ ${recallLoop.expected_followup ? `你心里想：${recallLoop.expected_followup}
     }
   }
 
+  // ── 生成前预检：同一动念刚被出站复核拦过就别再生成（2026-09-17 新增）─────────
+  // 背景：撞车／复核只能在**生成之后**发现，命中就要重新生成一次（"复核重生"），
+  // 重生再撞就整轮放弃——那一次的 token 全白花。9-15 生产实测：
+  //   18:10:38 复核重生 → 18:10:40 重生后仍撞车，放弃本次主动
+  // 关键事实：**同一动念的复检结论是稳定的**——动念、计划、证据都没变时，
+  // 再生成一次仍会被同一道门拦下。所以在这里用动念指纹记忆上一次的失败，
+  // 指纹未变就直接跳过，不再调模型。指纹一变（新动念/新计划/新证据）立即放行。
+  const precheck = proactivePrecheckGate(companion.id, {
+    intentionId: agencyCycle?.intention?.id || agencyCycle?.action?.intentionId || null,
+    planKey: agencyCycle?.plan?.dedupKey || null,
+    hasEnterpriseEvent: Boolean(opts.enterpriseEvent),
+    effectiveKind,
+  });
+  if (precheck.skip) {
+    log('info', `[Proactive] 生成前预检跳过 companion=${companion.id} reason=${precheck.reason}（同一动念上次已被拦，指纹未变，不重复调模型）`);
+    recordInitiative('blocked', { reason: `precheck_${precheck.reason}` });
+    return 'precheck_skip';
+  }
+
   let reply = await generateReply(systemPrompt, history, userMessage, {
     temperature: companion.temperature,
     max_tokens: Math.min(companion.max_tokens || 300, 300),
@@ -1672,7 +1834,15 @@ ${recallLoop.expected_followup ? `你心里想：${recallLoop.expected_followup}
     } else {
       // 重生后仍撞车 — 放弃本次主动消息，避免骚扰
       log('warn', `[Proactive] 重生后仍撞车，放弃本次主动 companion=${companion.id}`);
-      recordInitiative('blocked', { reason: retryEnterpriseIssue || retryInitiativeIssue || 'collision_after_retry' });
+      const blockReason = retryEnterpriseIssue || retryInitiativeIssue || 'collision_after_retry';
+      recordInitiative('blocked', { reason: blockReason });
+      // 2026-09-17：记下这一版动念/计划刚被拦，供下次生成前预检——
+      // 免得下一次机会又生成一遍、又被同一道门拦下（白烧 token）。
+      recordPrecheckFailure(companion.id, {
+        intentionId: agencyCycle?.intention?.id || agencyCycle?.action?.intentionId || null,
+        planKey: agencyCycle?.plan?.dedupKey || null,
+        reason: blockReason,
+      });
       return;
     }
   }

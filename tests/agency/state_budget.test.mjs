@@ -23,13 +23,31 @@ test('owner-scoped lease fences concurrent cognition', () => {
   assert.ok(second.fencing > first.fencing);
 });
 
-test('budget reserves attempts before provider work and stops at eight', () => {
-  const reservations = Array.from({ length: 8 }, (_, i) => db.reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 100, outputTokens: 100, attempts: 1, now: 86400000 + i }));
-  assert.ok(reservations.every(Boolean));
-  assert.equal(db.reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 100, outputTokens: 100, attempts: 1, now: 86400000 + 9 }), null);
+test('budget reserves attempts before provider work and stops at the daily cap', () => {
+  // 2026-09-14：日上限由硬编码 8/24000 改为可配置的 16/96000。
+  // 生产实测单次 appraise 就要 5242~10209 token，旧上限一天只够想一次。
+  const caps = db.getAgencyBudgetCaps();
+  assert.equal(caps.attempts, Number(process.env.XIYU_AGENCY_DAILY_ATTEMPT_CAP) || 16);
+  assert.equal(caps.tokens, Number(process.env.XIYU_AGENCY_DAILY_TOKEN_CAP) || 96000);
+  const cap = caps.attempts;
+  const reservations = Array.from({ length: cap }, (_, i) => db.reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 100, outputTokens: 100, attempts: 1, now: 86400000 + i }));
+  assert.ok(reservations.every(Boolean), `前 ${cap} 次预留都应成功`);
+  assert.equal(db.reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 100, outputTokens: 100, attempts: 1, now: 86400000 + cap }), null);
   const settled = db.settleAgencyBudget({ ...owner, id: reservations[0].id, usage: null });
   assert.equal(settled.usageKnown, false);
   assert.equal(settled.tokens, 200);
+});
+
+test('budget refuses a reservation that would exceed the token cap', () => {
+  // 另一天，专门验证 token 上限（而不是次数上限）能挡住超额预留。
+  // 旧实现的预留值远小于真实用量，上限形同虚设；本测试锁住「预留必须能挡住」。
+  const caps = db.getAgencyBudgetCaps();
+  const day = 2 * 86400000;
+  const each = 10000;
+  const maxReservations = Math.floor(caps.tokens / each);
+  const ok = Array.from({ length: maxReservations }, (_, i) => db.reserveAgencyBudget({ ...owner, purpose: 'plan', inputTokens: each, outputTokens: 0, attempts: 1, now: day + i }));
+  assert.ok(ok.every(Boolean), `前 ${maxReservations} 次预留都应成功`);
+  assert.equal(db.reserveAgencyBudget({ ...owner, purpose: 'plan', inputTokens: each, outputTokens: 0, attempts: 1, now: day + maxReservations }), null);
 });
 
 test('waiting_user needs delivered input and stale CAS cannot overwrite', () => {
@@ -87,6 +105,69 @@ test('feedback and intention transition commit together and deduplicate', () => 
     update: { state: 'active', lastFeedbackAt: new Date().toISOString() },
   });
   assert.equal(stale.status, 'conflict_retry');
+});
+
+// 2026-09-14 回归：反馈落库失败的两个真实成因，各自锁一条断言。
+//
+// 生产症状：同一动念上一条用户消息先 committed、紧接着连刷 status=invalid
+// （2026-09-14 出现 6 次以上），表现为"她记不住用户的反应"。
+// 排查出两个独立成因：
+//   (1) 版本冲突：调用方读到的 version 到提交时已过期 → 可重试。
+//   (2) 非法状态转移：动念处于 preparing（正在取数）时模型常给 nextState=active，
+//       而 `preparing → active` 不在转移表内 → 重试无用，整条反馈被丢弃。
+test('stale-version feedback succeeds after re-reading the intention', () => {
+  const intention = makeIntention('retry-after-conflict');
+  const preparing = db.updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'preparing' });
+  // 第一次提交：用过期版本 → 应返回可重试的 conflict_retry
+  const conflicted = db.commitAgencyFeedback({
+    ...owner,
+    intentionId: intention.id,
+    expectedVersion: intention.version,      // 故意用过期的 version
+    feedback: { sourceMessageId: 'retry-msg-1', kind: 'topic_shift', rawRef: '换个话题', interpretation: '话题转移', confidence: 1 },
+    update: { state: 'ready', lastFeedbackAt: new Date().toISOString() },   // ready 是 preparing 的合法目标
+  });
+  assert.equal(conflicted.status, 'conflict_retry', '过期版本必须回 conflict_retry 而不是 invalid');
+
+  // 模拟修复后的调用方：重读最新版本再试一次
+  const fresh = db.getAgencyIntention(intention.id, owner);
+  assert.ok(fresh, '动念仍应存在');
+  assert.equal(fresh.version, preparing.version, '重读应拿到最新版本');
+  const retried = db.commitAgencyFeedback({
+    ...owner,
+    intentionId: intention.id,
+    expectedVersion: fresh.version,          // 用最新 version
+    feedback: { sourceMessageId: 'retry-msg-1', kind: 'topic_shift', rawRef: '换个话题', interpretation: '话题转移', confidence: 1 },
+    update: { state: 'ready', lastFeedbackAt: new Date().toISOString() },
+  });
+  assert.equal(retried.status, 'committed', '重读后重试应当成功');
+  assert.equal(retried.intention.state, 'ready');
+});
+
+test('illegal nextState is clamped instead of losing the whole feedback', () => {
+  // 复现生产场景：动念在 preparing，模型给 active（非法转移）。
+  // 修复前：整条反馈被丢弃 → status=invalid。
+  // 修复后：状态收敛到合法目标，反馈本身必须落库。
+  const intention = makeIntention('clamp-illegal-transition');
+  db.updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'preparing' });
+  const current = db.getAgencyIntention(intention.id, owner);
+  assert.equal(current.state, 'preparing');
+
+  const committed = db.commitAgencyFeedback({
+    ...owner,
+    intentionId: intention.id,
+    expectedVersion: current.version,
+    feedback: { sourceMessageId: 'clamp-msg-1', kind: 'answer', rawRef: '回答了', interpretation: '用户给了回答', confidence: 1 },
+    update: { state: 'active', lastFeedbackAt: new Date().toISOString() },   // preparing → active 非法
+  });
+  assert.equal(committed.status, 'committed', '非法 nextState 不应导致整条反馈丢失');
+  assert.notEqual(committed.intention.state, 'active', '不得写入非法状态');
+  assert.ok(['suspended', 'ready', 'preparing'].includes(committed.intention.state),
+    `应收敛到合法目标，实际 ${committed.intention.state}`);
+  // 反馈记录本身必须真的落库（这才是"她记住用户反应"的依据）
+  // 注意：parseAgencyFeedback 返回原始行，字段名是 snake_case。
+  const list = db.listAgencyFeedback({ ...owner, intentionId: intention.id, limit: 5 });
+  assert.ok(list.some(f => f.source_message_id === 'clamp-msg-1'), '反馈记录必须已持久化');
+  assert.ok(list.some(f => f.kind === 'answer'), '反馈类型应正确保存');
 });
 
 test.after(() => store.close());

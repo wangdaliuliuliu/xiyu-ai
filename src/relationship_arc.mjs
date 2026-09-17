@@ -90,6 +90,27 @@ function _maxStateFromEnv() {
   return (v === 'hurt' || v === 'cold' || v === 'withdrawing') ? v : null;
 }
 
+/**
+ * 冲突弧总开关（2026-09-14 新增）。
+ *
+ * 背景：生产实测 `pressure_spam` 会把「我看看你的洗衣机」这类玩笑误判成伤害信号，
+ * 使角色进入 hurt 并随后 70% 概率跳过主动时段，而此时三条恢复路径都不可达
+ * （warm=0 / 互动<5 / 互动≠0），只能干等 72 小时自然消化。
+ *
+ * 这里提供**唯一的、可配置的总开关**，避免为关掉风险功能而回滚代码：
+ *   - 默认 on：保持原有全部行为，不影响既有部署。
+ *   - off：两个 tick 入口直接返回「状态不变、不建事件、不计信任」，
+ *          表达层随之拿到 arcState='normal'，即完全关闭冲突弧。
+ * 关闭期间事件照常保留在库里，重新打开后按原规则推进。
+ */
+const ARC_DISABLED_VALUES = ['0', 'false', 'no', 'off', 'disabled'];
+
+export function arcEnabled() {
+  const v = String(process.env.ARC_ENABLED ?? 'on').trim().toLowerCase();
+  return !ARC_DISABLED_VALUES.includes(v);
+}
+
+
 // v1.22 PR-L3（批注②）：经前 PMS 对 arc 的影响 **默认 off=shadow-first**——记"若应用是否改判"
 // 不生效，跑数据后维护者据 shadow 分方向占比再拍开。1/true/on=开。
 function _pmsArcEnabledFromEnv() {
@@ -143,6 +164,17 @@ export function tickArcOnSignal(ctx = {}) {
   const isSoft = kind === 'warm' || kind === 'give_space';
   const sev = Math.max(0, Math.min(4, Math.round(Number(signal.severity) || 0)));
   const apologyKind = signal.apologyKind === 'generic' ? 'generic' : 'matched';
+
+  // 总开关：关闭时消息驱动侧也完全不介入（不升级、不建事件、不消解）。
+  const enabled = 'arcEnabled' in ctx ? ctx.arcEnabled !== false : arcEnabled();
+  if (!enabled) {
+    if (state !== 'normal') {
+      res.state = 'normal';
+      res.changed = true;
+    }
+    res.reason = 'arc_disabled';
+    return res;
+  }
 
   // 运维钳位解析：ctx.maxState 显式注入（测试用，null=不钳）；缺省读 env ARC_MAX_STATE
   const maxState = 'maxState' in ctx ? ctx.maxState : _maxStateFromEnv();
@@ -330,6 +362,18 @@ export function tickArcOnTime(ctx = {}) {
   const res = _mkRes(state);
   const neg = NEGLECT_IDX[neglectStage] ?? 0;
   const hoursIn = _hoursSince(stateChangedAt, now);
+
+  // 总开关（ctx.arcEnabled 显式注入用于测试；缺省读 env ARC_ENABLED）。
+  // 关闭时：改为 normal、不建/结事件、不计信任——即完全不介入。
+  const enabled = 'arcEnabled' in ctx ? ctx.arcEnabled !== false : arcEnabled();
+  if (!enabled) {
+    if (state !== 'normal') {
+      res.state = 'normal';
+      res.changed = true;
+    }
+    res.reason = 'arc_disabled';
+    return res;
+  }
 
   // 运维钳位解析：ctx.maxState 显式注入（测试用，null=不钳）；缺省读 env ARC_MAX_STATE
   const maxState = 'maxState' in ctx ? ctx.maxState : _maxStateFromEnv();

@@ -35,6 +35,37 @@ const ev = (over = {}) => ({
   created_at: hAgo(24), severity_updated_at: null, ...over,
 });
 
+// ═══ ARC_ENABLED 总开关（2026-09-14 新增）═══════════════════════════════════
+// 背景：pressure_spam 会误判普通玩笑，把角色推入 hurt，而三条恢复路径
+//（warm>=3 / 互动>=5 且 72h / 互动==0）可能同时不可达，只能干等自然消化。
+// 用户要求可关闭，且关闭不得依赖回滚代码。
+{
+  // 关闭后：不建事件、不进 hurt
+  const off = sig({ arcEnabled: false, signal: { kind: 'harsh_words', severity: 4 } });
+  ok(off.state === 'normal', '开关: off 时不进 hurt/cold');
+  ok(off.eventOp == null, '开关: off 时不建事件');
+  ok(off.reason === 'arc_disabled', '开关: off 时 reason 标记 arc_disabled');
+
+  // 关闭后：存量 hurt 压回 normal（运维复位路径）
+  const reset = tim({ arcEnabled: false, state: 'hurt', stateChangedAt: hAgo(2) });
+  ok(reset.state === 'normal' && reset.changed === true, '开关: off 时存量 hurt 压回 normal');
+  ok(reset.eventOp == null, '开关: off 复位时不结事件（不动她的历史）');
+
+  // 关闭后：时间 tick 不推进 neglect 升级
+  const noNeglect = tim({ arcEnabled: false, neglectStage: 'disappointed' });
+  ok(noNeglect.state === 'normal', '开关: off 时 neglect 不推进');
+
+  // 开启时原行为必须不变 —— 防止开关误伤正常路径
+  const on = sig({ arcEnabled: true, signal: { kind: 'harsh_words', severity: 4 } });
+  ok(on.state === 'cold', '开关: on 时原行为不变（sev4 → cold）');
+  const on3 = sig({ arcEnabled: true, signal: { kind: 'harsh_words', severity: 3 } });
+  ok(on3.state === 'hurt', '开关: on 时 sev3 → hurt');
+
+  // 不传 arcEnabled 视为开启，保证既有调用方行为不变
+  const dflt = sig({ signal: { kind: 'harsh_words', severity: 3 } });
+  ok(dflt.state === 'hurt', '开关: 缺省视为 on（既有调用方不受影响）');
+}
+
 // ── severity 合成（regex 证据 + inner OS 佐证，LLM 单独封顶 sev2）─────────
 ok(composeSeverity({ regexSeverity: 3, perceivedHurt: 2 }) === 3, 'sev: regex3+hurt2 → 3');
 ok(composeSeverity({ regexSeverity: 0, perceivedHurt: 3 }) === 2, 'sev: LLM 单独信号封顶 2');

@@ -210,6 +210,31 @@ const ACTION_TRANSITIONS = {
   delivery_unknown: ['delivered', 'cancelled'], failed: ['planned', 'cancelled'],
 };
 
+/**
+ * 把模型给出的 nextState 夹到当前状态真正允许的目标（2026-09-14 新增）。
+ *
+ * 背景：`commitAgencyFeedback` 会把模型反馈里的 nextState 直接交给
+ * `updateAgencyIntention`，而后者对非法转移返回 null，事务随即抛错，
+ * 整个反馈被丢弃并记为 `status=invalid`（error=invalid_transition）。
+ * 生产实测：动念处于 `preparing`（正在取数）时模型常给 `active`，
+ * 但 `preparing → active` 并不在转移表里，于是同一动念上的每条用户消息都失败，
+ * 2026-09-14 出现 6 次以上，表现为"她记不住用户的反应"。
+ *
+ * 这类失败**重试无用**（与版本冲突不同），因为目标状态本身非法；
+ * 因此在这里做一次确定性收敛：优先取模型想要的目标，
+ * 退而取"不丢进度、等条件满足再推进"的安全目标（suspended / ready / active）。
+ */
+function clampAgencyNextState(currentState, desiredState, transitions = AGENCY_TRANSITIONS) {
+  if (!desiredState || desiredState === currentState) return desiredState ?? currentState;
+  if (AGENCY_TERMINAL.has(currentState)) return currentState;
+  const allowed = transitions[currentState] || [];
+  if (allowed.includes(desiredState)) return desiredState;
+  for (const fallback of ['waiting_user', 'active', 'ready', 'suspended']) {
+    if (allowed.includes(fallback)) return fallback;
+  }
+  return currentState;
+}
+
 function agencyId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(7).toString('hex')}`;
 }
@@ -508,15 +533,46 @@ export function releaseAgencyLease({ accountId, companionId, token, fencing } = 
   return Boolean(getDb().prepare('UPDATE agency_runtime SET lease_until=0 WHERE account_id=? AND companion_id=? AND lease_token=? AND fencing=?').run(owner.accountId, owner.companionId, token, fencing).changes);
 }
 
+// 每日动念预算上限（可用环境变量覆盖，无需改代码）。
+//
+// 背景（2026-09-14 生产实测）：
+//   旧实现硬编码「8 次 / 24000 token」。而单次 appraise 实测就要 5242～10209 token
+//   （均值约 6900），一次完整动念（appraise + plan）约 1.5～2 万 token。
+//   于是 24000 的额度只够想一次，之后每个机会都是 status=blocked calls=0，
+//   全天 sent=0。
+//
+// 新默认值的依据：
+//   - 单次完整动念预留约 19700 token（appraise 10800 + plan 8900）
+//   - 96000 / 19700 ≈ 4.9 次/天，留出续接（continue）与重试的余量
+//   - 次数上限 16 与「日次数」解耦：formation 上限独立为 8（单次预留最多占 8 个名额）
+//
+// 调优入口（写在 systemd drop-in 或 .env）：
+//   XIYU_AGENCY_DAILY_ATTEMPT_CAP=16
+//   XIYU_AGENCY_DAILY_TOKEN_CAP=96000
+const AGENCY_DAILY_ATTEMPT_CAP = (() => {
+  const raw = Number(process.env.XIYU_AGENCY_DAILY_ATTEMPT_CAP);
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : 16;
+})();
+const AGENCY_DAILY_TOKEN_CAP = (() => {
+  const raw = Number(process.env.XIYU_AGENCY_DAILY_TOKEN_CAP);
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : 96000;
+})();
+const AGENCY_FORMATION_CAP = 8;
+
+/** 供测试与运维核对当前生效的每日动念预算上限。 */
+export function getAgencyBudgetCaps() {
+  return { attempts: AGENCY_DAILY_ATTEMPT_CAP, tokens: AGENCY_DAILY_TOKEN_CAP, formation: AGENCY_FORMATION_CAP };
+}
+
 export function reserveAgencyBudget({ accountId, companionId, purpose, inputTokens, outputTokens, attempts = 1, now = Date.now(), freeReflection = false } = {}) {
   const owner = normalizeAgencyOwner(accountId, companionId);
   const tokens = Number(inputTokens) + Number(outputTokens);
   if (!owner || !['appraise', 'plan', 'continue', 'schema_repair', 'review', 'research_summary'].includes(purpose) || !Number.isSafeInteger(tokens) || tokens <= 0 || inputTokens < 0 || outputTokens < 0) return null;
   const day = new Date(now + 8 * 3600_000).toISOString().slice(0, 10);
-  const formation = ['appraise', 'plan', 'continue', 'schema_repair'].includes(purpose) ? Math.max(1, Math.min(8, Number(attempts) || 1)) : 0;
+  const formation = ['appraise', 'plan', 'continue', 'schema_repair'].includes(purpose) ? Math.max(1, Math.min(AGENCY_FORMATION_CAP, Number(attempts) || 1)) : 0;
   return getDb().transaction(() => {
     const spent = getDb().prepare('SELECT COALESCE(SUM(attempts),0) AS calls, COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(free_reflection),0) AS reflections FROM agency_budget_reservations WHERE account_id=? AND companion_id=? AND day=?').get(owner.accountId, owner.companionId, day);
-    if (spent.calls + formation > 8 || spent.tokens + tokens > 24000 || (freeReflection && spent.reflections >= 2)) return null;
+    if (spent.calls + formation > AGENCY_DAILY_ATTEMPT_CAP || spent.tokens + tokens > AGENCY_DAILY_TOKEN_CAP || (freeReflection && spent.reflections >= 2)) return null;
     const id = agencyId('budget');
     getDb().prepare("INSERT INTO agency_budget_reservations(id,account_id,companion_id,day,purpose,attempts,tokens,free_reflection,state) VALUES (?,?,?,?,?,?,?,?,'reserved')").run(id, owner.accountId, owner.companionId, day, purpose, formation, tokens, freeReflection ? 1 : 0);
     return { id, ...owner, purpose, tokens, day };
@@ -564,7 +620,10 @@ export function commitAgencyFeedback({ accountId, companionId, intentionId, expe
       if (!current || current.version !== expectedVersion) return { status: 'conflict_retry' };
       const saved = recordAgencyFeedback({ ...feedback, ...owner, intentionId });
       if (!saved) throw new Error('invalid_feedback');
-      const intention = updateAgencyIntention(intentionId, { ...update, ...owner, expectedVersion });
+      // 模型给的 nextState 可能不是合法转移（如 preparing → active）；
+      // 非法时收敛到安全目标，避免整条反馈被丢弃（详见 clampAgencyNextState）。
+      const nextState = clampAgencyNextState(current.state, update.state);
+      const intention = updateAgencyIntention(intentionId, { ...update, state: nextState, ...owner, expectedVersion });
       if (!intention) throw new Error('invalid_transition');
       recordAgencyConcernEvent({
         id: `feedback:${saved.id}`,

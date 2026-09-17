@@ -33,7 +33,7 @@ import {
   getActiveCurrentWorks,   // v1.21.4 PR-W2: current_works 表达层注入
   getActiveLifeStates,     // v1.22 PR-L1: #317 四档身体事件闸查档案
   createPhotoRequestAudit, updatePhotoRequestAudit, finishPhotoRequestAudit,
-  listAgencyIntentions, commitAgencyFeedback,
+  listAgencyIntentions, commitAgencyFeedback, getAgencyIntention,
 } from './db.mjs';
 import { buildSystemPrompt, buildFirstTurnHint } from './companion.mjs';
 import { syncUpdateCompanionState, extractAndSaveMemories, extractAndUpdateUserProfile, consumePendingCelebration, detectUserConfession, detectCompanionConfession, detectIntimacyOvereach, canAcceptConfession, daysSinceMeet, DAYS_TO_LOVER } from './memory.mjs';
@@ -1644,31 +1644,46 @@ async function postProcess(companion, userMsg, botReply, enterpriseTurn = null, 
           if (feedbackValidation.ok) {
             const feedback = feedbackValidation.value;
             const feedbackSourceId = sourceMessageId || `turn:${Date.now()}`;
-            const committed = commitAgencyFeedback({
-              accountId: enterpriseTurn.accountId,
-              companionId: companion.id,
-              intentionId: pendingIntention.id,
-              expectedVersion: pendingIntention.version,
-              feedback: {
-                sourceMessageId: feedbackSourceId,
-                kind: feedback.kind,
-                actionId: null,
-                rawRef: userMsg,
-                interpretation: feedback.interpretation,
-                confidence: feedback.confidence,
-              },
-              update: {
-                state: feedback.nextState,
-                lastFeedbackAt: new Date().toISOString(),
-                completionEvidence: feedback.nextState === 'completed'
-                  ? [{ sourceMessageId: feedbackSourceId, kind: feedback.kind }]
-                  : [],
-              },
-            });
-            if (committed.status === 'committed' || committed.status === 'duplicate') {
+            // 版本冲突重试（2026-09-14 修）：
+            // 上面读 pendingIntention 到真正提交之间，同一动念可能已被其它路径
+            // 更新（版本号推进）。此时 commitAgencyFeedback 返回 'conflict_retry'，
+            // 表示"可重读后再试"。旧实现直接把结果写日志、不重试，于是同一条
+            // 用户消息会连着刷出 status=invalid（真失败）——生产实测 2026-09-14
+            // 出现 6 次以上，表现为"她记不住用户的反应"。
+            // 现在：conflict_retry 时重读该动念的最新版本，最多重试 3 次。
+            let committed = null;
+            let attemptIntention = pendingIntention;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              committed = commitAgencyFeedback({
+                accountId: enterpriseTurn.accountId,
+                companionId: companion.id,
+                intentionId: attemptIntention.id,
+                expectedVersion: attemptIntention.version,
+                feedback: {
+                  sourceMessageId: feedbackSourceId,
+                  kind: feedback.kind,
+                  actionId: null,
+                  rawRef: userMsg,
+                  interpretation: feedback.interpretation,
+                  confidence: feedback.confidence,
+                },
+                update: {
+                  state: feedback.nextState,
+                  lastFeedbackAt: new Date().toISOString(),
+                  completionEvidence: feedback.nextState === 'completed'
+                    ? [{ sourceMessageId: feedbackSourceId, kind: feedback.kind }]
+                    : [],
+                },
+              });
+              if (committed?.status !== 'conflict_retry') break;
+              const fresh = getAgencyIntention(attemptIntention.id, { accountId: enterpriseTurn.accountId, companionId: companion.id });
+              if (!fresh) break;                 // 动念已被清理，无意义重试
+              attemptIntention = fresh;
+            }
+            if (committed?.status === 'committed' || committed?.status === 'duplicate') {
               log('info', `[Agency] 反馈已记录 companion=${companion.id} intention=${pendingIntention.id} kind=${feedback.kind} status=${committed.status}`);
             } else {
-              log('warn', `[Agency] 反馈事务未提交 companion=${companion.id} intention=${pendingIntention.id} status=${committed.status}`);
+              log('warn', `[Agency] 反馈事务未提交 companion=${companion.id} intention=${pendingIntention.id} status=${committed?.status} error=${committed?.error || ''}`);
             }
           } else {
             log('warn', `[Agency] feedback schema 无效 companion=${companion.id} reason=${feedbackValidation.reason}`);
