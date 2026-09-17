@@ -28,6 +28,41 @@ const DEFAULT_PLAN = Object.freeze({
   reason: '',
 });
 
+/**
+ * 单份画面方案（2026-09-15 由「三候选 + 本地挑选」改为「单方案」）。
+ *
+ * 为什么改（用户决定）：
+ *   1. 成本——一次规划出三个完整候选，规划模型的输出 token 约为单方案的三倍；
+ *      而预算刚调整为按真实用量计费，三候选没有必要。
+ *   2. 可归因——去掉本地打分挑选后，"画面方向"完全由规划模型一次决定，
+ *      出问题时只需看一个方案的输入输出，不再有"选错了"这一层。
+ *
+ * 字段按「自拍提示词九块结构」组织，每块只负责一件事（一个属性只有一个 owner），
+ * 避免同一属性被两个字段重复描述而在生图时互相打架：
+ *   ① 拍摄声明      固定模板（photo_sender 的 cameraAnchor），不由模型写
+ *   ② 构图距离      framing
+ *   ③ 人物真实感    固定模板（visual_identity），不由模型写
+ *   ④ 瞬间动作      action
+ *   ⑤ 表情          expression
+ *   ⑥ 穿搭          wardrobe
+ *   ⑦ 生活环境      environment（= 场景 + 光线 + 具体生活物件锚点）
+ *   ⑧ 缺陷块        固定模板（realismTail），不由模型写
+ *   ⑨ 负面约束      固定模板，放提示词最后
+ * 模型另需给出两个"选择用的元字段"（不进入生图提示词）：
+ *   sceneMoment / compositionFamily / timelineRelation / variationTags
+ */
+const DEFAULT_VISUAL_PLAN = Object.freeze({
+  sceneMoment: '',
+  framing: '',
+  action: '',
+  expression: '',
+  wardrobe: '',
+  environment: '',
+  compositionFamily: '',
+  timelineRelation: 'current',
+  variationTags: [],
+});
+
 const PHOTO_TYPES = new Set([
   'casual_daily',
   'self_present',
@@ -489,98 +524,82 @@ function getVisualContext(companion, imageProviderCapabilities = getImageProvide
   }
 }
 
-function visualCandidatePrompt(candidate, { seasonalClothing = '' } = {}) {
-  if (!candidate || typeof candidate !== 'object') return '';
-  let wardrobe = safeText(candidate.wardrobe, 700);
-  if (/lightweight breathable/i.test(seasonalClothing) && /\b(?:cardigan|sweater|hoodie|knit|heavy|thick|scarf|long-sleeve)\b/i.test(wardrobe)) {
-    wardrobe = 'lightweight breathable casual clothes suited to the current place and activity';
-  }
-  let cameraRelationship = safeText(candidate.cameraRelationship, 700);
-  // 规划模型偶尔会在 LIVED 候选里继续给出“居中但不僵硬”这种伪变化。
-  // 这里只修正取景关系，不增添肢体、动作或道具，避免把自由度变成动作模板。
-  if (candidate.__captureIntent === 'lived' && /\b(?:centered|centred|symmetrical)\b/i.test(cameraRelationship)) {
-    cameraRelationship = cameraRelationship
+
+/**
+ * 规范化模型给出的单份画面方案（九块结构）。
+ *
+ * 与旧 selectVisualCandidate 的区别：不再从多个候选里挑，而是把**这一份**
+ * 方案的各块做确定性清洗：
+ *   - 每块独立取词、独立截断（不再整条 1400 字一刀，避免某块过长挤掉别人）
+ *   - framing 里的"居中/对称"在 LIVED 意图下改写为偏轴（保留旧行为）
+ *   - 自拍机位里不保留"越过肩膀"等外部视角措辞
+ *   - 块内空白折叠
+ * 返回 null 表示方案不可用（调用方据此判 imagePrompt rejected）。
+ */
+export function normalizeVisualPlan(raw = {}, { captureIntent = 'lived', shotMode = 'SELFIE' } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  const pick = (value, max) => safeText(value, max).replace(/\s+/g, ' ').trim();
+
+  let framing = pick(raw.framing, 300);
+  // LIVED 下把"居中/对称"改成自然偏轴——与旧候选逻辑一致，避免每张都是证件照式正对。
+  if (captureIntent === 'lived' && /\b(?:centered|centred|symmetrical)\b/i.test(framing)) {
+    framing = framing
       .replace(/\bfront-facing\b/gi, 'slightly off-axis')
-      .replace(/\b(?:her (?:face|figure|upper body) )?(?:centered|centred)(?: but not rigid)?\b/gi, 'a loose asymmetric placement that lets the active surroundings share the frame')
+      .replace(/\b(?:her (?:face|figure|upper body) )?(?:centered|centred)(?: but not rigid)?\b/gi,
+        'a loose asymmetric placement that lets the active surroundings share the frame')
       .replace(/\bsymmetrical\b/gi, 'naturally asymmetric');
   }
-  const parts = [
-    candidate.visualMoment,
-    cameraRelationship,
-    candidate.environmentalEffect,
-    wardrobe,
-  ].map((part) => safeText(part, 700)).filter(Boolean);
-  return sanitizePhotoPrompt([...new Set(parts)].join(', '), 1400);
+  // 自拍机位里不能再出现"越过肩膀/从背后"这类外部视角措辞，否则生图模型会画成
+  // 第三人称或镜子自拍。注意 over-the-shoulder 中间是 "the"（不是 her），
+  // "over her shoulder" 是另一种写法——两者都要覆盖。
+  if (SELFIE_SHOTMODES.has(shotMode)) {
+    framing = framing
+      .replace(/\bover[\s-]+(?:the|her)[\s-]+shoulder\b/gi, 'off-axis')
+      .replace(/\bfrom[\s-]+behind\b/gi, 'from a close off-axis angle');
+  }
+
+  const plan = {
+    sceneMoment: pick(raw.sceneMoment, 400),
+    framing,
+    action: pick(raw.action, 300),
+    expression: pick(raw.expression, 160),
+    wardrobe: pick(raw.wardrobe, 300),
+    environment: pick(raw.environment, 400),
+    compositionFamily: pick(raw.compositionFamily, 80),
+    timelineRelation: (() => {
+      const v = String(raw.timelineRelation || 'current').toLowerCase();
+      return ['current', 'advanced', 'paused', 'invented'].includes(v) ? v : 'current';
+    })(),
+    variationTags: Array.isArray(raw.variationTags)
+      ? raw.variationTags.slice(0, 8).map((t) => pick(t, 40)).filter(Boolean)
+      : [],
+  };
+  // 场景瞬间/动作是画面主体，取景/环境是画面骨架：各自至少有一个才算出得了图。
+  if (!plan.sceneMoment && !plan.action) return null;
+  if (!plan.framing && !plan.environment) return null;
+  return plan;
 }
 
 /**
- * 一个规划调用可给出多个“成片方向”，本地选择最符合当下且最不机械重复的一项。
- * 元数据只用于打分，不会逐字段塞进生图 prompt，因此不会制造肢体/道具冲突。
+ * 把单份方案按「自拍提示词九块结构」拼成给生图模型的一段文本。
+ *
+ * 这里只输出**模型负责的 6 块**（场景瞬间/构图/动作/表情/穿搭/环境）；
+ * 其余由固定模板承担，保证"一个属性只有一个 owner"，不会两处描述互相打架：
+ *   拍摄声明 + 人物真实感 + 缺陷块 → photo_sender（cameraAnchor / identityPrompt / realismTail）
+ *   参考图锚定句 + 负面约束        → photo_sender（referenceFirst / 尾部约束）
  */
-export function selectVisualCandidate(raw, {
-  captureIntent = 'lived',
-  shotMode = 'SELFIE',
-  recentPhotoContext = '',
-  freshContextText = '',
-  seasonalClothing = '',
-} = {}) {
-  const candidates = Array.isArray(raw?.visualCandidates)
-    ? raw.visualCandidates.slice(0, 4)
-    : [];
-  const scored = candidates.map((candidate, index) => {
-    const preparedCandidate = { ...candidate };
-    if (SELFIE_SHOTMODES.has(shotMode)) {
-      preparedCandidate.visualMoment = String(preparedCandidate.visualMoment || '')
-        .replace(/\bglances? back over her shoulder\b/gi, 'turns slightly toward the lens mid-motion')
-        .replace(/\bover[- ](?:her[- ])?shoulder\b/gi, 'off-axis');
-      preparedCandidate.cameraRelationship = String(preparedCandidate.cameraRelationship || '')
-        .replace(/\bfrom behind and to the side\b/gi, 'from a close off-axis front-side angle')
-        .replace(/\bover[- ](?:her[- ])?shoulder\b/gi, 'off-axis');
-      preparedCandidate.compositionFamily = String(preparedCandidate.compositionFamily || '')
-        .replace(/\bover[- ](?:her[- ])?shoulder\b/gi, 'off-axis');
-      preparedCandidate.variationTags = Array.isArray(preparedCandidate.variationTags)
-        ? preparedCandidate.variationTags.map((tag) => String(tag).replace(/\bover[- ](?:her[- ])?shoulder\b/gi, 'off-axis'))
-        : preparedCandidate.variationTags;
-    }
-    const prompt = visualCandidatePrompt({ ...preparedCandidate, __captureIntent: captureIntent }, { seasonalClothing });
-    if (!prompt) return null;
-    const tags = Array.isArray(candidate.variationTags)
-      ? candidate.variationTags.map((tag) => safeText(tag, 40).toLowerCase()).filter(Boolean)
-      : [];
-    const haystack = `${prompt} ${candidate.attentionState || ''} ${candidate.compositionFamily || ''} ${tags.join(' ')}`.toLowerCase();
-    let score = 0;
-    if (candidate.activityVisible === true) score += 4;
-    const timelineRelation = String(candidate.timelineRelation || '').toLowerCase();
-    if (timelineRelation === 'current') score += 7;
-    if (['advanced', 'paused', 'invented', 'stale'].includes(timelineRelation)) score -= 9;
-    if (String(candidate.environmentalEffect || '').trim()) score += 2;
-    if (String(candidate.cameraRelationship || '').trim()) score += 2;
-    if (String(candidate.wardrobe || '').trim()) score += 1;
-    score += Math.min(new Set(tags).size, 3) * 0.5;
-    if (captureIntent === 'lived') {
-      if (candidate.posed === false) score += 3;
-      if (candidate.posed === true) score -= 5;
-      if (STANDARD_SELFIE_RE.test(prompt)) score -= 6;
-      if (/\b(?:centered|centred|symmetrical)\b/i.test(haystack)) score -= 10;
-      if (/\bclose-up selfie\b|\bface filling most of the frame\b/i.test(haystack)) score -= 4;
-      if (DIRECT_CAMERA_ATTENTION_RE.test(haystack) || /\bwarm,? open expression\b/i.test(haystack)) score -= 3;
-      if (/\b(?:straight-on|front-facing|facing (?:the )?camera|facing forward)\b/i.test(haystack)) score -= 5;
-      if (/\bsoft,? even exposure\b/i.test(haystack)) score -= 2;
-      if (/\b(?:off-camera|glancing sideways|medium shot|transition light|mixed light)\b/i.test(haystack)) score += 2;
-      if (/\b(?:mid-motion|walking|turning|reclining|leaning|wind|motion|glancing|laughing|off-center|tilted|mixed light|low light)\b/i.test(haystack)) score += 1;
-    }
-    // “自拍成片”中再出现另一台手机，通常会把模型带成镜子自拍或第三人称。
-    // 这比普通审美偏差更严重，因此直接把该候选放到合法候选之后。
-    if (SELFIE_VISIBLE_DEVICE_RE.test(haystack)) score -= 20;
-    if (THIRD_PERSON_SELFIE_RE.test(haystack)) score -= 15;
-    const contextIsEnRoute = /(?:正?往|走向|去.+路上|在路上|toward|on the way)/i.test(freshContextText);
-    if (contextIsEnRoute && /\b(?:inside|has just (?:sat|picked|arrived)|sitting at)\b/i.test(haystack)) score -= 9;
-    if (contextIsEnRoute && /\bpaus(?:e|es|ed|ing)\b/i.test(haystack)) score -= 3;
-    if (/smiling expression/i.test(recentPhotoContext) && /\bsmil(?:e|es|ing)\b/i.test(haystack)) score -= 4;
-    if (/front-facing gaze/i.test(recentPhotoContext) && (DIRECT_CAMERA_ATTENTION_RE.test(haystack) || /\bfront-facing\b/i.test(haystack))) score -= 3;
-    return { candidate: preparedCandidate, prompt, index, score };
-  }).filter(Boolean).sort((a, b) => b.score - a.score || a.index - b.index);
-  return scored[0] || null;
+export function visualPlanPrompt(raw = {}, { captureIntent = 'lived', shotMode = 'SELFIE' } = {}) {
+  const plan = normalizeVisualPlan(raw, { captureIntent, shotMode });
+  if (!plan) return '';
+  const blocks = [
+    plan.sceneMoment,
+    plan.framing,
+    plan.action,
+    plan.expression,
+    plan.wardrobe,
+    plan.environment,
+  ].filter(Boolean);
+  return sanitizePhotoPrompt([...new Set(blocks)].join(', '), 1600);
 }
 
 function normalizePlan(raw, {
@@ -613,12 +632,16 @@ function normalizePlan(raw, {
   }
 
   const caption = sanitizePhotoCaption(raw.caption);
-  const selectedVisual = SELFIE_SHOTMODES.has(shotMode) || shotMode === 'CANDID'
-    ? selectVisualCandidate(raw, { captureIntent, shotMode, recentPhotoContext, freshContextText, seasonalClothing })
+  // 2026-09-15：三候选 + 本地挑选 → 单份方案（用户决定，为省 token 并去掉一层出错点）。
+  // 人物机位用九块结构拼装；无脸机位（SCENERY/ACTIVITY_POV）仍走模型给的整段 imagePrompt。
+  const usesVisualPlan = SELFIE_SHOTMODES.has(shotMode) || shotMode === 'CANDID';
+  const visualPlan = usesVisualPlan
+    ? normalizeVisualPlan(raw.visualPlan || raw, { captureIntent, shotMode })
     : null;
+  const planPrompt = usesVisualPlan ? visualPlanPrompt(visualPlan || {}, { captureIntent, shotMode }) : '';
   const routedPrompt = normalizePhotoPromptForShot({
     shotMode,
-    imagePrompt: selectedVisual?.prompt || raw.imagePrompt,
+    imagePrompt: planPrompt || raw.imagePrompt,
     userText,
     currentScene,
     proactiveScene,
@@ -643,15 +666,22 @@ function normalizePlan(raw, {
     routeCorrected: routedPrompt.corrected,
     routeCorrectionReason: routedPrompt.corrected ? routedPrompt.reason : '',
     captureIntent,
-    selectedVisualCandidate: selectedVisual ? {
-      index: selectedVisual.index,
-      score: selectedVisual.score,
-      compositionFamily: safeText(selectedVisual.candidate.compositionFamily || '', 80),
-      attentionState: safeText(selectedVisual.candidate.attentionState || '', 120),
-      timelineRelation: safeText(selectedVisual.candidate.timelineRelation || '', 24),
-      variationTags: Array.isArray(selectedVisual.candidate.variationTags)
-        ? selectedVisual.candidate.variationTags.slice(0, 8).map((tag) => safeText(tag, 40))
-        : [],
+    // 2026-09-15：由 selectedVisualCandidate（三候选结果）改为 visualPlan（单份方案）。
+    // 保留 compositionFamily / timelineRelation / variationTags —— 它们是**防止
+    // 与最近几张机械重复**的依据，也是出问题时唯一可回看的画面元信息。
+    visualPlan: visualPlan ? {
+      compositionFamily: visualPlan.compositionFamily,
+      timelineRelation: visualPlan.timelineRelation,
+      variationTags: visualPlan.variationTags,
+      // 逐块留存，便于核对"到底哪一块写了什么"（该字段不进入生图提示词）
+      blocks: {
+        sceneMoment: visualPlan.sceneMoment,
+        framing: visualPlan.framing,
+        action: visualPlan.action,
+        expression: visualPlan.expression,
+        wardrobe: visualPlan.wardrobe,
+        environment: visualPlan.environment,
+      },
     } : null,
     // v1.21.6 hotfix: shotMode/aspect 必须挂到 plan 上——调用方（proactive/bot）读
     // plan.shotMode / plan.aspect 喂 sendCompanionPhoto。d22bf73(v1.21.2) 把
@@ -751,7 +781,8 @@ export function extractRecentPhotoFeatures(row = {}) {
   let selected = null;
   try {
     const plan = typeof row.plan_json === 'string' ? JSON.parse(row.plan_json) : row.plan_json;
-    selected = plan?.selectedVisualCandidate || null;
+    // 新结构优先；旧记录回退到 selectedVisualCandidate（见下方 attention 取值）
+    selected = plan?.visualPlan || plan?.selectedVisualCandidate || null;
   } catch {
     selected = null;
   }
@@ -760,7 +791,9 @@ export function extractRecentPhotoFeatures(row = {}) {
   if (/mirror selfie|bathroom mirror/.test(text)) features.push('mirror framing');
   else if (/phone front camera|front-camera|phone selfie/.test(text)) features.push('phone selfie');
   if (/off-center|slightly imperfect framing|cropped|edge of the frame/.test(text)) features.push('imperfect framing');
-  const attention = String(selected?.attentionState || '').toLowerCase();
+  // 2026-09-15：读新结构 visualPlan（单方案）；同时兼容历史审计记录里的旧结构
+  // selectedVisualCandidate，否则改动前的照片会突然"不被算作重复"，反重复判断退化。
+  const attention = String(selected?.attentionState || selected?.blocks?.action || '').toLowerCase();
   const composition = String(selected?.compositionFamily || '').toLowerCase();
   const variationTags = Array.isArray(selected?.variationTags)
     ? selected.variationTags.map((tag) => safeText(tag, 40).toLowerCase()).filter(Boolean)
@@ -916,16 +949,25 @@ function buildPlannerPrompt({ companion, userText, recentMessages, trigger, proa
   // 手机前摄里呈现。SCENERY/ACTIVITY-POV 不注入人物状态，避免污染无脸机位。
   const humanVisualMomentRule = (shotMode === 'SELFIE' || shotMode === 'ENV_SELFIE' || shotMode === 'CANDID')
     ? `
-★★★ 人物画面调度（不是禁令清单）★★★
+★★★ 画面方案：按「九块结构」一次给出一份完整方案 ★★★
 本次 capture intent 是 ${captureIntent === 'posed' ? 'POSED：对方明确想要一张认真、端正的照片，可以自然摆拍' : 'LIVED：普通索图，应从她正在经历的生活里选择一个自然瞬间，不把标准正面微笑当默认答案'}。
-先根据仍然新鲜的上下文，设计 3 个彼此不同但都真实可拍的候选画面。每个候选围绕一个统一的生活瞬间，让人物状态、当前活动、自拍画面关系、注意力、衣着、环境以及环境造成的风、运动、光线或清晰度变化自然地互相解释。环境不能只是人物背后的布景，道具也不能只是证明上下文的标签。若上下文明确她正在进行某项活动，候选必须停留在同一时刻：不能让她先停下、坐好、到达目的地或换到下一场景后再拍。
-LIVED 模式下，三个候选不能只是同一个正面头像换背景。把三项当成三个不同的视觉导演方案：候选 1 保持上下文中正在发生的动作并采用自然偏轴取景；候选 2 同样不改变当前动作，但让人物与现场环境共同讲清当下；候选 3 可以自由选择另一种仍处在同一时刻的生活瞬间。至少两项必须让当前活动在人物状态或画面关系里真正可见、使用不完全居中的自然取景，并让注意力与正在发生的事情相连，而不是三项都直视镜头微笑。只有 POSED 模式才允许把端正、居中、直视作为主要方向。这是候选设计要求，不要把它抄成 imagePrompt 里的负向限制。
-timelineRelation 必须按事实判断，不能为了通过选择而全部写 current：原文是“正在走向/在路上”时，停在入口、已经进入、排队、坐下都属于 advanced；只有仍在走的同一动作才是 current。
-候选应体现不同的画面关系或瞬间选择，但不要为了“不同”凭空添加与上下文无关的动作和物品。不要逐个规定身体部位或每只手；只描述成片真正需要看见的整体状态，避免多个动作互相竞争。
+只给**一份**方案（不再给多个候选），每块只写自己那一件事，块与块之间不得重复描述同一个属性：
+  framing      —— 机位与取景：距离、角度、是否偏轴、裁切多少、环境占画面比例。
+  action       —— 这一瞬间她正在做什么（正在说话/刚抬眼/手刚离开键盘…）。
+  expression   —— 脸部表情，独立成块，不要在 action 里重复描写表情。
+  wardrobe     —— 这一张的穿着。
+  environment  —— 场景 + 光线 + **2~4 个具体生活物件**（皱床单、台灯、充电线、摊开的书、水杯、搭在椅背上的衣服…）。只写"卧室/咖啡馆"这类类别词不够：生活感来自背景里有可验证的、带使用痕迹的物件。
+  sceneMoment  —— 把这一瞬间写成一句完整的英文画面描述（上面各块的总纲）。
+环境不能只是人物背后的布景，道具也不能只是证明上下文的标签。若上下文明确她正在进行某项活动，
+必须停留在同一时刻：不能让她先停下、坐好、到达目的地或换到下一场景后再拍。
+LIVED 模式下不要给标准正面微笑+居中的证件照式方案；只有 POSED 才允许端正、居中、直视。
+timelineRelation 必须按事实判断：原文是"正在走向/在路上"时，停在入口、已经进入、排队、坐下都属于 advanced；只有仍在走的同一动作才是 current。
+不要为了显得不同而凭空添加与上下文无关的动作和物品。不要逐个规定身体部位或每只手；只描述成片真正需要看见的整体状态，避免多个动作互相竞争。
 ${shotMode === 'SELFIE' || shotMode === 'ENV_SELFIE'
-    ? '三个候选都必须是手机前置摄像头最终拍到的自拍成片，不是外部观察者看她自拍，也不是镜子自拍。cameraRelationship 只描述最终画面里的角度、距离、取景偏移和环境占比，不重复 front camera，也不描述她举着手机的外部动作；候选中不要出现 phone held、holding/holds a phone、eyes on screen、看向手机、over-the-shoulder 或 from-behind 等外部视角措辞。'
+    ? '方案必须是手机前置摄像头最终拍到的自拍成片，不是外部观察者看她自拍，也不是镜子自拍。framing 只描述最终画面里的角度、距离、取景偏移和环境占比，不重复 front camera，也不描述她举着手机的外部动作；不要出现 phone held、holding/holds a phone、eyes on screen、看向手机、over-the-shoulder 或 from-behind 等外部视角措辞。'
     : ''}
-visualCandidates 中每项使用以下字段：visualMoment（英文，当前正在发生的完整画面）、cameraRelationship（英文，简洁描述人物与画面的关系）、environmentalEffect（英文，环境对人物或成像的真实影响；没有则为空）、wardrobe（英文，符合季节、地点和活动的自然穿着）、attentionState（英文短语）、compositionFamily（英文短标签）、timelineRelation（只能是 current/advanced/paused/invented，必须诚实标记，进入目的地或停下当前动作不能写 current）、activityVisible（布尔值）、posed（布尔值）、variationTags（2-5 个英文短标签）。这些内部字段用于选择，只有被选中候选的四个画面描述字段会进入生图提示词。`
+以上字段写在 \`visualPlan\` 对象里；另有三个**只用于防重复、不进入生图提示词**的元字段：
+compositionFamily（英文短标签）、timelineRelation（current/advanced/paused/invented）、variationTags（2-5 个英文短标签）。`
     : '';
 
   const prompt = `请判断是否适合发送一张生活感照片，并只返回 JSON。
@@ -990,9 +1032,9 @@ ${recentPhotoContext ? `- recent sent-photo variation signatures（仅用于避�
 3. 主动照片必须低频，像临时想分享当下。
 ${humanVisualMomentRule}
 ★★★ imagePrompt 美学强约束（v1.10.34）★★★
-4. imagePrompt 以及 visualCandidates 的画面描述必须是英文。**（若 shot mode = SCENERY-POV 或 ACTIVITY-POV，不需要 visualCandidates，只输出 imagePrompt。）** 人物机位不要在候选里重复完整外貌身份，身份会由发送层统一加入；候选只负责真正决定这张照片的生活瞬间与视觉状态。
-5. imagePrompt 可参考上面的 current mood / facial cue，但只有在与当前场景一致时才使用；不要为了满足字段而每次强行微笑，也不要把上一张照片的表情当作默认表情。
-6. imagePrompt 可继承角色既有的服装风格和身份特征，但不要每次重复同一件衣服。若对话已明确她正在穿什么，将其视为场景事实；否则服装必须同时符合 seasonal clothing baseline、当前地点、室内外环境与正在进行的活动。角色的“甜美/清新/酷”只决定款式倾向，不能覆盖季节厚薄与场景功能；海边、床上休息、校园通勤、室内家居等场景应各自选择物理上舒服、现实可信的穿着，不把毛衣、开衫或厚外套当成默认单品。**禁止 navy office sweater / formal collar shirt / professional attire**。
+4. visualPlan 各块与 imagePrompt 的画面描述必须是英文。**（若 shot mode = SCENERY-POV 或 ACTIVITY-POV，不需要 visualPlan，只输出 imagePrompt。）** 人物机位不要在 visualPlan 里重复完整外貌身份，身份会由发送层统一加入；visualPlan 只负责真正决定这张照片的生活瞬间与视觉状态。
+5. visualPlan.expression 只写这一张的脸部表情（半成品微笑/刚抬眼/若有所思…），不要写成"完美营业笑"；也不要把上一张照片的表情当默认值。表情不要和 action 块重复描写。
+6. visualPlan.wardrobe 由你判断穿着，必须同时自洽于三件事：**seasonal clothing baseline（上面的季节基线）、当前地点、正在做的事**。海边/校园/床上休息/室内家居/通勤路上各自选物理上舒服、现实可信的穿搭。角色的"甜美/清新/酷"只决定款式倾向，不能覆盖季节厚薄与场景功能。可以按天气常理选择长袖、针织、开衫或薄外套——但**不要把厚外套、羽绒服、围巾这类冬季单品穿在夏秋场景里**。**禁止 navy office sweater / formal collar shirt / professional attire**。
 7. **必须严格按上面给出的 shot mode 写构图**：
    - **ENVIRONMENTAL SELFIE**：人是主要人物，环境景物也要成为当前场景的一部分；只写前摄最终成像，不写举手机、拿手机、手机在面前、手臂拿手机或镜子自拍；具体景别、姿态、视线和背景比例由上下文决定，不能机械套用近景半身。
    - **SELFIE**：是真实手机前摄的最终成片，人物身份清楚，日常环境与对话相符；手机和镜子不入镜，不写外部观察者看见她拍照；不要默认胸像、正脸、伸手、微笑或统一的背景虚化。
@@ -1000,9 +1042,9 @@ ${humanVisualMomentRule}
    - **ACTIVITY-POV**：拍她手头正在做的事/东西（作业本+笔、电脑屏幕上的文档/代码、画到一半的画、做饭案板…），first-person POV 低头看桌面，**那个物件/作业/工作内容填满画面、是绝对主角**；**绝不出现她的脸、不是自拍**，最多一只手或衣袖在画面边缘；写当前时段光线。**只写桌面/物件不写人物外貌/表情/着装 —— 规则 4/5/6/9 对它不适用**。
    - **CANDID**：随手抓拍，slightly imperfect framing, natural everyday moment。
    **人像照的景别和姿态不要固定**：由当前活动、身体状态、空间大小和拍摄关系决定；上下文没有规定时，只需避免与最近照片完全重复，不要列举或强行指定某个动作。
-8. **【最重要】照片里的时间感必须与 current shanghai time 严格一致**：必须写当前 day part 的 lighting hint 并明确点出时段——**夜晚/深夜就必须写 "at night, dark sky / dark window outside, lit only by the available indoor light"，绝对禁止出现 daylight / sunshine / bright daytime / sunny / 户外白天**；只有白天才写日光。**imagePrompt 与 caption 必须同一时间、同一地点自洽**：caption 说"刚到家台灯下补作业"，imagePrompt 就必须是"室内夜晚书桌台灯"，绝不能是户外/白天。**若 companion current scene 与当前时段冲突**（如夜里 22 点 current_scene 还写"在路上"），**一律以当前时段的合理场景为准**重新设定（22 点该是到家/卧室/书桌，不是还在路上的大白天）。只选 plausible scenes 范围内的场景；**深夜禁 cafe/奶茶店/outdoor daylight**，清晨禁 dark bedroom。**忠实使用现场原有环境光和普通手机自动曝光，不为人物重新布光、不把现场优化成专业人像；保留由当前环境自然造成的曝光、白平衡、清晰度和动态范围差异。**自拍使用符合当前画面的 phone-camera perspective，风景使用 wide natural phone-camera perspective。**户外场景要符合现实**：放学/通勤路上应有 a few passersby / 路灯 / 店铺等真实街景，夜晚户外要有 street lights / lit shops，不是空无一人的大白天。**必须明确写出所在背景/环境，且与 caption 一致**——只写人不写环境，模型会自己乱编背景；环境应像正在使用中的真实空间，不要无依据地整理成布景或添加装饰。**不要为了满足固定词序而把每张照片都写成 close chest-up；先写当前场景和可见事实，再自然决定人物和取景。**
-9. 人物身份、肤质与稳定外貌由发送层统一补充；visualCandidates 不重复这些固定信息。候选可以写由当下环境真实造成的碎发、风、运动轻微模糊、曝光或白平衡变化，但只能在场景确实支持时使用，不能把它们变成每张照片的新模板。严禁具体年龄数字以及 minor / teen / underage / child / kid / schoolgirl / lolita / high school，也不要写 8k / 4k / ultra HD / masterpiece / hyperreal / flawless skin / perfect skin。
-10. imagePrompt **不要写 "no XXX" / "without XXX" 等 negative 排除句**（会被本系统的安全过滤误伤）。改用**正面同义词替代**：
+8. **【最重要】照片里的时间感必须与 current shanghai time 严格一致**：必须写当前 day part 的 lighting hint 并明确点出时段——**夜晚/深夜就必须写 "at night, dark sky / dark window outside, lit only by the available indoor light"，绝对禁止出现 daylight / sunshine / bright daytime / sunny / 户外白天**；只有白天才写日光。**visualPlan/imagePrompt 与 caption 必须同一时间、同一地点自洽**：caption 说"刚到家台灯下补作业"，画面就必须是"室内夜晚书桌台灯"，绝不能是户外/白天。**若 companion current scene 与当前时段冲突**（如夜里 22 点 current_scene 还写"在路上"），**一律以当前时段的合理场景为准**重新设定（22 点该是到家/卧室/书桌，不是还在路上的大白天）。只选 plausible scenes 范围内的场景；**深夜禁 cafe/奶茶店/outdoor daylight**，清晨禁 dark bedroom。**忠实使用现场原有环境光和普通手机自动曝光，不为人物重新布光、不把现场优化成专业人像；保留由当前环境自然造成的曝光、白平衡、清晰度和动态范围差异。**自拍使用符合当前画面的 phone-camera perspective，风景使用 wide natural phone-camera perspective。**户外场景要符合现实**：放学/通勤路上应有 a few passersby / 路灯 / 店铺等真实街景，夜晚户外要有 street lights / lit shops，不是空无一人的大白天。**必须明确写出所在背景/环境，且与 caption 一致**——只写人不写环境，模型会自己乱编背景；环境应像正在使用中的真实空间，不要无依据地整理成布景或添加装饰。**不要为了满足固定词序而把每张照片都写成 close chest-up；先写当前场景和可见事实，再自然决定人物和取景。**
+9. 人物身份、肤质与稳定外貌由发送层统一补充；visualPlan 不重复这些固定信息。visualPlan 可以写由当下环境真实造成的碎发、风、运动轻微模糊、曝光或白平衡变化，但只能在场景确实支持时使用，不能把它们变成每张照片的新模板。严禁具体年龄数字以及 minor / teen / underage / child / kid / schoolgirl / lolita / high school，也不要写 8k / 4k / ultra HD / masterpiece / hyperreal / flawless skin / perfect skin。
+10. visualPlan 各块与 imagePrompt **不要写 "no XXX" / "without XXX" 等 negative 排除句**（会被本系统的安全过滤误伤）。改用**正面同义词替代**：
     - 想表达「不要专业写真」→ 写 "casual amateur smartphone snapshot vibe, everyday spontaneous moment"
     - 想表达「不要 35mm 电影感」→ 写 "available ambient light with ordinary phone auto-exposure"
     - 想表达「不要疲惫脸」→ 写 "fresh lively bright face, gentle warm energy"
@@ -1010,7 +1052,7 @@ ${humanVisualMomentRule}
     - 想表达「不要 anime/插画」→ 写 "photorealistic, real life photography"
     - 想表达「不要 minor/teen/schoolgirl」→ 写 "youthful early-college vibe, soft natural features, warm bright eyes, fresh clear complexion with realistic natural skin texture and fine pores"（不要 dewy/baby-faced/round-cheeks 那种磨皮娃娃脸）
     - 想表达「不要 NSFW/nude/sexual」→ 写 "wholesome, fully clothed, casual everyday attire"
-11. imagePrompt 不要包含隐私、token、手机号、精确地址。
+11. visualPlan 各块与 imagePrompt 不要包含隐私、token、手机号、精确地址。
 12. hidden emotion / visual identity context 只作为隐藏参考，不要把内部 JSON 字段或分数写进 imagePrompt 或 caption。
 ★ **真实出版物护栏（V1214 正式解前临时规矩）**：若画面涉及真实出版物（书/杂志/专辑/教材/报纸），**只拍摊开内页、或书脊/封面一角的局部，绝不拍完整正面封面**（生成封面=伪造、复刻=版权，两条都死）；POV 俯拍翻开的跨页或文字段落即可。**例外不受限：她自己的笔记本/手账/便签本封面**（私人物品非出版物，可正常拍）。
 ★ **天气护栏（真实天气数据接入前）**：**禁止拍雨/雪/雷暴/大雾等天气依赖场景**（无法核实当天真实天气，瞎拍即假）；晴/阴/室内不受限，晚霞/月亮已有专门锚定（见上面日落/月相事实）。${candidExperiment ? `
@@ -1027,11 +1069,17 @@ caption：
   "photoType": "casual_daily",
   "realism": "realistic_daily",
   "imagePrompt": "非人物机位使用；人物机位可留空作为兼容兜底",
-  "visualCandidates": [
-    {"visualMoment":"...","cameraRelationship":"...","environmentalEffect":"...","wardrobe":"...","attentionState":"...","compositionFamily":"...","timelineRelation":"current","activityVisible":true,"posed":false,"variationTags":["...","..."]},
-    {"visualMoment":"...","cameraRelationship":"...","environmentalEffect":"...","wardrobe":"...","attentionState":"...","compositionFamily":"...","timelineRelation":"current","activityVisible":true,"posed":false,"variationTags":["...","..."]},
-    {"visualMoment":"...","cameraRelationship":"...","environmentalEffect":"...","wardrobe":"...","attentionState":"...","compositionFamily":"...","timelineRelation":"current","activityVisible":true,"posed":false,"variationTags":["...","..."]}
-  ],
+  "visualPlan": {
+    "sceneMoment": "一句完整的英文画面描述：此刻正在发生的那个瞬间",
+    "framing": "机位与取景：距离、角度、偏轴、裁切、环境占画面比例",
+    "action": "这一瞬间她正在做什么（不要在表情块里重复）",
+    "expression": "脸部表情（独立一块）",
+    "wardrobe": "这一张的穿着（自己判断季节基线+地点+活动是否自洽）",
+    "environment": "场景 + 光线 + 2~4 个具体生活物件",
+    "compositionFamily": "英文短标签",
+    "timelineRelation": "current|advanced|paused|invented",
+    "variationTags": ["...", "..."]
+  },
   "caption": "短句",
   "delayImageMs": 1200,
   "delayCaptionMs": 900,

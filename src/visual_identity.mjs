@@ -158,14 +158,19 @@ export function buildVisualIdentitySpec({ companion = {}, persona = {}, emotionS
   ].filter(Boolean);
 
   return {
-    // v1.10.42: 用具象视觉特征代替"adult mid-20s"硬编码。让模型画"非常
-    // 年轻但成年看起来"，跟 photo_planner v1.10.41 prompt 对齐。
+    // v1.10.42: 用具象视觉特征代替"adult mid-20s"硬编码。
+    // 2026-09-15（用户决定）：**删除所有"定形状"描述**。
+    // 原因：用户已亲自锁定身份参考图；文字里再写"圆脸 / 大鹿眼 / 小下巴 /
+    // 纤细娇小"会与参考图争抢身份定义，模型两边都要迁就 → 脸型漂移、每张趋同。
+    // 身份改由参考图独自承载（发送层在最前面加锚定句）。
+    // 只保留两类：① 成年标记（安全相关，不可删）② 真人质感词（这是"像真人"
+    // 而不是"脸型"，与参考图不冲突）。
     ageLook: 'clearly adult youthful everyday appearance, soft natural facial features',
-    face: 'soft round full cheeks, large warm doe eyes, small delicate chin, natural skin texture, relaxed fresh makeup-free complexion',
+    face: 'natural skin texture, relaxed fresh makeup-free complexion',
     hair: `${hairColor} ${hairStyle} hair, stable across photos`,
-    body: 'slim petite youthful frame, natural proportions, modest casual styling',
+    body: 'natural proportions, modest casual styling',
     style: `${clothing} clothing style, casual youthful daily wear`,
-    vibe: safeText(vibeParts.join(', ') || 'fresh, warm, photogenic, naturally pretty everyday feeling', 180),
+    vibe: safeText(vibeParts.join(', ') || 'fresh, warm, naturally pretty everyday feeling', 180),
     avoid: SAFE_AVOID,
   };
 }

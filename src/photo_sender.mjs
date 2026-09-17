@@ -381,13 +381,15 @@ export function buildFinalImagePrompt({
   // 的 referenceNote（否则 i2i 会硬把脸塞进无脸的桌面/风景 POV，如电脑前的工作 POV 变成人脸 candid）。
   // v1.22.x（接线第六案）：无脸判定走**权威 shotMode**（有就信它），shotMode 缺失才退回文本嗅探。
   const sceneryShot = isNoFaceShot({ shotMode, scenePrompt: routedScenePrompt });
+  // 2026-09-15：身份分支已上移为 referenceFirst（放提示词最前）。
+  // 这里只保留**无脸 POV** 的说明；有人脸自拍不再重复写一遍身份句。
   const referenceNote = shotMode === 'ACTIVITY_POV'
     ? 'top-down desk-only composition aimed directly at the desk surface; the desk and its contents fill the entire frame, with the camera centered above the tabletop; do NOT show her face, no hands, sleeves, lap, legs or torso are visible anywhere, the visible area stays exclusively focused on the desk and its contents'
     : sceneryShot
       ? 'first-person POV photo of the scene/objects in front of her — do NOT show her face, do NOT make it a selfie; the objects/scenery fill the frame, at most one hand or sleeve at the edge'
-    : (referenceImagePath && providerCapabilities?.referenceImage
-      ? 'use the provided reference image for FACE IDENTITY ONLY (keep the same face and likeness); completely IGNORE and REPLACE the reference image background, location, lighting, time of day, clothing, body pose, head angle, gaze, expression and framing — build the entire scene strictly from this text prompt. The photo time of day and setting MUST match the text (e.g. if the text says night, it must look like night), never the reference. Let the current scene determine the shot distance and composition'
-      : 'keep the same adult person identity using the stable description');
+      : (referenceImagePath && providerCapabilities?.referenceImage
+        ? ''   // 身份句已由 referenceFirst 承担，避免重复
+        : 'keep the same adult person identity using the stable description');
   // 去重：planner 写的 imagePrompt 常已含部分质感词，拼接前剔掉重复，
   // 避免顶到 900 字上限把独有的质感词（skin texture / grain / DoF）截掉。
   const sceneLower = String(routedScenePrompt || '').toLowerCase();
@@ -395,7 +397,24 @@ export function buildFinalImagePrompt({
     const key = t.split(',')[0].trim().toLowerCase();
     return key && !sceneLower.includes(key);
   });
+  // 2026-09-15（用户决定）：身份锚定句提到**最前面**，且明确写出"同一人物、气质一致"。
+  // 背景：用户已亲自锁定身份参考图；同时身份模板里的"定形状"词（圆脸/鹿眼/小下巴/
+  // 纤细娇小）已删除，脸型不再由文字承载。因此参考图成为唯一身份依据，
+  // 必须在提示词最前声明，否则模型会优先执行后面的场景描述而淡化参考图。
+  // 保留 "FACE IDENTITY ONLY" 这一既有提法：它同时是无脸机位闸门的判据
+  // （photo_noface_gate_smoke / photo_shot_route_smoke 依赖），不因改写而失效。
+  const referenceFirst = (referenceImagePath && providerCapabilities?.referenceImage)
+    ? 'Use the reference image for FACE IDENTITY ONLY as the definitive identity anchor for this person: '
+      + 'keep her facial features and overall temperament consistent with the reference, '
+      + 'the same adult woman across photos. '
+      + 'From the reference use ONLY her face and likeness: completely IGNORE and REPLACE '
+      + 'the reference image background, location, lighting, time of day, clothing, body pose, '
+      + 'head angle, gaze, expression and framing — build the entire scene strictly from this text prompt. '
+      + 'The photo time of day and setting MUST match the text (e.g. if the text says night, it must look like night), '
+      + 'never the reference. Let the current scene determine the shot distance and composition'
+    : '';
   const prompt = [
+    sceneryShot ? '' : referenceFirst,
     sceneryShot ? '' : cameraAnchor,
     routedScenePrompt,
     sceneryShot ? '' : identityPrompt,   // 无脸 POV 不写人物外貌描述
