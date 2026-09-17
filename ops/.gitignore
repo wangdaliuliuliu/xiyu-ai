@@ -1,0 +1,18 @@
+# 运维产物的忽略规则
+#
+# 这里放的是"一次性诊断输出"，不是代码。它们有两个问题：
+#   1. 体积大：selfie-diag.txt 曾达 386KB（数据库 dump）
+#   2. 会泄露：诊断输出里带生产环境细节，曾出现明文 API key
+#      （ops/xiyu-readonly-check/p4-output.txt 的 DEEPSEEK_API_KEY）
+#
+# 规律：输出结果一律是 *.txt；脚本一律是 .sh / .ps1 / .mjs / .bat。
+# 所以这里忽略 *.txt，脚本照常入库。
+
+# 所有诊断/部署输出
+*.txt
+
+# 万一有人把结果存成别的名字
+*-output.*
+*-result.*
+*-diag.*
+*-dryrun.*

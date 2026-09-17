@@ -1,5 +1,7 @@
 # Xiyu repository maintenance rules
 
+For any task involving Xiyu's product direction, persona, agency, proactive contact, enterprise assistance, workbench integration, photos, or production deployment, first read `docs/XIYU-MASTER-HANDOFF-2026-09-14.md`. Record every investigation, decision, code change, test, deployment, rollback, unresolved issue, and user-visible result in `docs/XIYU-SUCCESSOR-WORKLOG.md` before handing the task off. Do not mark an item complete merely because code or a report exists; use the status vocabulary defined in the master handoff.
+
 Before changing proactive contact, enterprise assistance, memory routing, persona expression, or message delivery, read `docs/xiyu-architecture-maintenance-map.md` and trace the existing owner module listed there.
 
 Extend the existing owner unless its contract is demonstrably wrong. Do not add a second scheduler, intention selector, memory store, enterprise router, safety gate, delivery adapter, or receipt ledger beside the canonical one.
