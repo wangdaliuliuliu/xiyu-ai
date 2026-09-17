@@ -27,6 +27,7 @@ import {
   updateAgencyIntention, createAgencyAction, updateAgencyAction, listAgencyIntentions, listAgencyActions, listAgencyFeedback, recordAgencyFeedback, recordAgencyConcernEvent,
   reserveAgencyBudget, settleAgencyBudget,
   acquireAgencyLease, beginAgencyCognition, releaseAgencyLease, commitAgencyReceipt,
+  retireAgencyIntention,          // 2026-09-18：动念收尾（同时作废其未完成动作）
   getAppSetting, setAppSetting,   // 2026-09-17：通道关闭连续计数（可观测性）
 } from './db.mjs';
 import { getActivePeriodContext, isPeriodHeavyWindow, isPmsActive } from './life_state.mjs';   // v1.22 PR-L3 经期情绪路由
@@ -62,7 +63,7 @@ import { buildEmotionPromptHint, getEmotionStateWithDefaults, getMissingLevel, g
 import { buildRealityFacts, isNightShanghai } from './utils/reality_facts.mjs';   // v1.21.4 PR-W3 统一真实世界事实层（收编月相）
 import { buildShapingPromptHint } from './shaping.mjs';
 import { evaluateProactive, recordProactiveSent } from './proactive_engine.mjs';
-import { buildInitiativeDecision, selectProactiveLifeEvidence, initiativePrompt, initiativeReplyIssue, appendInitiativeReceipt } from './initiative.mjs';
+import { buildInitiativeDecision, selectProactiveLifeEvidence, initiativePrompt, initiativeReplyIssue, appendInitiativeReceipt, judgeIntentionRetirement } from './initiative.mjs';
 import {
   normalizeContextSnapshot, buildAgencyAppraisalPrompt, buildAgencyPlanPrompt, buildAgencyContinuationPrompt,
   parseStructuredJson, validateAppraisalProposal, validatePlanProposal,
@@ -157,6 +158,92 @@ function clearChannelClosedStreak() {
   try {
     setAppSetting(CHANNEL_CLOSED_KEY, '0');
   } catch { /* 计数失败不影响发送 */ }
+}
+
+/**
+ * 动念收尾闸（2026-09-18）。
+ *
+ * 对每条入参动念跑 judgeIntentionRetirement：
+ *   - 超保质期 → expired（时效类；每日仪式不受影响）
+ *   - 来源连续两次确认已消解 → completed
+ *   - 同指纹连续失败 ≥3 次 → suspended
+ * 命中即调 retireAgencyIntention（同一事务收尾动念并作废其未完成动作），
+ * 并把该动念从本轮候选剔除。
+ *
+ * 全部 fail-open：判定或写库失败都不阻塞本轮，宁可多留一条也不误杀。
+ * 返回 { kept, retired }，便于日志与回归断言。
+ */
+function retireExpiredIntentions(owner, intentions) {
+  const list = Array.isArray(intentions) ? intentions.filter(Boolean) : [];
+  if (!list.length) return { kept: [], retired: [] };
+  const kept = [];
+  const retired = [];
+  for (const intention of list) {
+    let verdict = { retire: false, reason: 'judge_error' };
+    try {
+      verdict = judgeIntentionRetirement(intention, {
+        // 第二层（来源已消解）与第三层（反复被拦）需要外部证据；
+        // 这里先只启用确定性最强的第一层，避免在无证据时误收。
+        resolvedStreak: 0,
+        blockStreak: 0,
+      });
+    } catch (e) {
+      log('warn', `[Agency] 动念收尾判定异常（按保留处理）companion=${owner.companionId} id=${intention.id}: ${e.message}`);
+      kept.push(intention);
+      continue;
+    }
+    if (!verdict.retire) { kept.push(intention); continue; }
+    try {
+      const result = retireAgencyIntention(intention.id, {
+        accountId: owner.accountId,
+        companionId: owner.companionId,
+        state: verdict.retire,
+        reason: verdict.reason,
+      });
+      if (result) {
+        retired.push({ id: intention.id, state: verdict.retire, reason: verdict.reason, cancelledActions: result.cancelledActions.length });
+        log('info', `[Agency] 动念收尾 companion=${owner.companionId} id=${intention.id} → ${verdict.retire}（${verdict.reason}）`
+          + `，同时作废未完成动作 ${result.cancelledActions.length} 个`);
+      } else {
+        kept.push(intention);   // 写库没成功就保留，不要静默丢
+      }
+    } catch (e) {
+      log('warn', `[Agency] 动念收尾写库失败（按保留处理）companion=${owner.companionId} id=${intention.id}: ${e.message}`);
+      kept.push(intention);
+    }
+  }
+  return { kept, retired };
+}
+
+/**
+ * 收尾闸的**独立扫描**入口（2026-09-18 追加）。
+ *
+ * 为什么要有这一层：收尾判定原先只挂在主动认知周期里，而认知周期受
+ * `reconsiderAfter` 冷却控制，实测可以隔 1 小时以上才跑一次（例如
+ * 2026-09-18 00:01 跑完，到 02:56 期间一次都没跑）。这期间一条早就该死
+ * 的动念仍然停在候选池里，遇到时段照样被选中、照样撞车。
+ *
+ * 收尾是"清理自己家里的垃圾"，不该等外部条件（有没有到说话的点）才做。
+ * 所以把它从认知周期里**提出来**，每个 tick 都扫一遍：
+ *   - 判定纯本地、无网络、无 LLM 调用，代价是一次 SELECT + 极少写
+ *   - 幂等：已终态的动念不会再被选中
+ *   - fail-open：任何异常都只记日志，绝不影响本轮投递
+ */
+function sweepIntentionRetirement(owner) {
+  try {
+    const all = listAgencyIntentions({
+      ...owner,
+      states: ['candidate', 'preparing', 'ready', 'waiting_user', 'active'],
+      // 上限取 listAgencyIntentions 的硬顶：扫描面必须覆盖全部非终态动念，
+      // 不能跟着候选列表的条数走（那正是 2026-09-17 那次漏扫的成因）。
+      limit: 50,
+    });
+    const { retired } = retireExpiredIntentions(owner, all);
+    return retired;
+  } catch (e) {
+    log('warn', `[Agency] 动念收尾扫描异常（不影响本轮）companion=${owner?.companionId}: ${e.message}`);
+    return [];
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -454,7 +541,22 @@ export async function runAgencyCycle({
   } catch (error) {
     log('warn', `[Agency] 无回应观测失败 companion=${owner.companionId}: ${error.message}`);
   }
-  const currentIntentions = snapshot.activeIntentions || listAgencyIntentions({ ...owner, states: ['candidate', 'preparing', 'ready', 'waiting_user', 'active'], limit: 8 });
+  // ── 动念候选（2026-09-18）──────────────────────────────────────────────
+  // 真正的**收尾**（过期判定 + 写库 + 作废其未完成动作）已由每个 tick 的
+  // `sweepIntentionRetirement` 独立完成，不在这里做，也不再依赖本轮认知
+  // 是否被冷却挡住——这修的是 2026-09-17 那次：一条问「订单系统汇总表 9-14
+  // 数据填了没」的动念停在 ready、派生动作 9-15 就过期，却因为认知周期隔了
+  // 一小时以上才跑而长期漏扫，被反复选中、反复撞同一条出站复核（9-17 一天撞
+  // 数次），还把当晚 22:08 的晚安挤成 agency_blocked。
+  //
+  // 这里只负责取候选喂模型，且条数与收尾扫描面**无关**（扫描面 50，候选 8）。
+  // 早先的 bug 正是把两者混为一谈：池子 9 条、候选窗口 8 条，第 9 条永远
+  // 落在扫描范围之外，于是永远不被判、永远不过期。
+  const currentIntentions = listAgencyIntentions({
+    ...owner,
+    states: ['candidate', 'preparing', 'ready', 'waiting_user', 'active'],
+    limit: 8,
+  });
   const currentFeedback = snapshot.recentFeedback || listAgencyFeedback({ ...owner, limit: 12 });
   const responsibilities = [
     ...(Array.isArray(snapshot.responsibilities) ? snapshot.responsibilities : []),
@@ -739,6 +841,23 @@ async function tick(now = new Date()) {
     for (const companion of companions) {
       // v1.5.2 B2 修：把每个 companion 的本 tick 处理包在 try 里，一个失败不连累其它
       try {
+        // ── 动念收尾扫描（2026-09-18）──────────────────────────────────────
+        // 特意放在**时间窗口判断之前**：清垃圾不该只在"允许说话的时间段"里做。
+        // 而且放在这里也保证了它不受认知周期冷却影响——判定是纯本地的
+        // （一次 SELECT + 极少写，无网络、无 LLM），每分钟扫一遍成本可忽略。
+        // 只收"保质期已过"的时效类动念；每日仪式不受保质期约束，
+        // 因此深夜扫描不会误杀明早要用的早安动念。
+        //
+        // owner 解析必须与下面 `runAgencyCycle` 完全同源（同一条微信绑定优先），
+        // 否则扫描的是一个 account_id、认知用的是另一个，扫描等于白扫。
+        {
+          const sweepBinding = getActiveWechatBinding(companion.wechat_user_id, companion.bot_id);
+          sweepIntentionRetirement({
+            accountId: Number(sweepBinding?.account_id || account?.account_id || 0) || null,
+            companionId: Number(companion.id),
+          });
+        }
+
         // 用户自定义时间窗口（companion.proactive_time_window，格式 "07:30-24:00"），fallback 到默认
         const window = parseTimeWindow(companion.proactive_time_window) || { start: defaultStart, end: LAST_MINUTE };
         if (minuteNow < window.start) continue;

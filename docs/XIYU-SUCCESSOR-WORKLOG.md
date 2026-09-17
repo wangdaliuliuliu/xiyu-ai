@@ -844,3 +844,277 @@
   `ssh -i ~/.ssh/xiyu-readonly-nopass admin@39.106.153.59 'sudo -n -u xiyu sqlite3 -readonly /opt/xiyu-ai/data/bot.db "SELECT key,value FROM app_settings WHERE key LIKE \"proactive_%\";"'`
 - **上传文件必须用** `ops/xiyu-readonly-check/safe-push.ps1`（base64 + sha256 校验），不要用 `cmd /c ssh < 文件`，否则中文会被破坏。
 - 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / `a7590a356021e1b8f99ecb6dac24f9c9ec122bf2`（本地改动仍未提交）
+
+## 2026-09-18 — 主动通道再次静默：过期动作死循环；新增「动念保质期与收尾」机制
+
+- 执行者：DeepSeek Harness（接手会话）
+- 用户目标：用户反映「9-17 下午之后她又不理我了」，怀疑又被阻拦。要求查清并修复。
+- 授权边界：用户明确授权调查、清理积压与实现修复。范围限定为动念生命周期（`initiative.mjs` / `db.mjs` / `proactive.mjs`）+ 一次数据清理。未改 `.env`、未改 systemd 单元、未触碰 LIMI / capybara-game。
+- 开始分支/HEAD：`codex/ideal-lab-completion-20260908` / 已推送 `b68f804`（本轮改动未提交）
+
+### 调查与判断
+
+**症状与取证**
+
+9-17 真实投递情况（`wechat_messages` 出站，唯一可信依据）：
+
+| 时间 | 结果 |
+|---|---|
+| 05:22 | 成功送达（"嘿什么呀，看完了就傻笑"）|
+| 15:58 | 成功送达 |
+| **18:09** | 复核重生 → 重生后仍撞车 → **放弃** |
+| **19:14** | 同一条，同样放弃 |
+| **20:45** | 同一条，同样放弃 |
+| **22:08** | `low_burden_goodnight` → **`agency_blocked`**（连晚安也被拦）|
+
+四次失败撞车原因完全相同：`订单表日报没有说清当前更新状态`。
+
+**根因：一条卡了两天的过期动念**
+
+```
+动念 agi_mu2igy2z_78b222d0c75665
+  state      = ready          ← 一直在候选池里（选择器含 ready）
+  expires_at = (空)           ← 动念从不过期
+  version    = 8              ← 被反复更新 8 次
+  desired    = 确认订单系统汇总表 2026-09-14 数据是尚未开始填写还是仍在路上
+
+它派生的动作 aga_mu2igzfi_448f47594dfeca
+  state      = planned        ← 从没进入 sending
+  expires_at = 2026-09-15T13:10:34Z   ← 过期已达 53.5 小时
+```
+
+**动作过期不会终结动念**，于是动念每小时被重新选中 → 重新生成（含一次重生）→ 撞在同一条出站复核上。这是死循环。
+
+同时库里还有 **5 条 `planned` 动作全部过期**（最短 48.6h、最长 94.6h，其中 4 条是历史晚安）。9-17 22:08 的晚安就是被这批陈旧动作拦掉的（`agency_blocked`）。
+
+**排除项**：预算充足（9-18 仅用 11,648 / 96,000），不是预算问题；微信窗口开着（15:58 刚成功过），不是平台限制。
+
+**三个子问题**
+1. 过期动作仍留在候选池 —— 选择器只查动念状态，不检查其派生动作是否已过期
+2. 上一轮新增的生成前预检未能拦住 —— 冷却窗 20 分钟，但 18:09→19:14 相隔 65 分钟已过窗；**对"内容注定失败"的情况，时间冷却无效**
+3. 晚安被旧动作拦 —— 与 1 同源（晚安动念下堆了 4 条陈旧动作）
+
+**规则回溯验证（部署前，纯只读）**
+
+新写 `ops/xiyu-readonly-check/probe-shelf-life-rule.mjs`，用拟议规则跑真实积压数据：
+- ✅ 5 条积压全部正确判为应过期
+- ⚠️ **同时暴露 3 条误杀**：`查询中影三天业绩`、`用早安承接新一天`、`睡前晚安` 被判过期
+- 误杀原因：正则看到"今天/最近"就当时效性。**这直接改变了设计**——必须先把具体日期与指标剔除，再判断"稳定意图"，且每日仪式不适用保质期。
+
+### 实际改动
+
+**清理积压（数据操作，可回滚）**
+- `ops/xiyu-readonly-check/cleanup-stale-actions.sh`：5 条过期 `planned` 动作 → `cancelled`；清空预检失败记忆。**未改动念状态**。
+- 备份：`/opt/xiyu-backups/stale-cleanup-20260917T183955Z/bot.db`（`integrity_check=ok`）
+
+**机制实现（三层）**
+- `src/initiative.mjs`：新增纯函数
+  - `classifyIntentionLifetime()`：四类 —— `time_bound_monitor`（24h）/ `time_bound_fact`（48h）/ `recurring_ritual`（**不适用保质期**）/ `non_time_bound`（14 天）；无法归类兜底 **7 天**
+  - **关键机制**：先 `stripConcreteEvidence()` 剔除具体日期与带单位数值，再判断稳定意图。英文 camelCase 键名（`readySheets=0`）不算具体指标。
+  - `intentionShelfDeadline()` / `isIntentionExpired()`
+  - `judgeIntentionRetirement()`：三层合成 —— 超保质期 → `expired`；来源连续**两次**确认消解 → `completed`；同指纹连续被拦 ≥3 次 → `suspended`
+- `src/db.mjs`：新增 `retireAgencyIntention()`
+  - **同一事务**内收尾动念 + 把其 `planned/running/prepared/sending` 动作置为 `cancelled`
+  - 允许从任意非终态一步收尾（含 `waiting_user → completed/expired`），因为"知识已过期"是生命周期终止而非普通状态转移
+  - 幂等；非法收尾状态被拒且不写库
+- `src/proactive.mjs`：新增 `retireExpiredIntentions()` 并接入选动念入口
+- 新增测试：`tests/agency/intention_lifetime.test.mjs`（**70 条**）；`tests/agency/state_budget.test.mjs`（+1 条收尾事务断言，共 8 条）
+
+### 验证
+
+- **离线确定性**：`intention_lifetime` **70/70**；`state_budget` **8/8**
+- **同条件对照**（隔离目录 `/tmp/xiyu-life-verify`）：
+  - 基线（生产原版三文件）：通过 13 / 失败 4
+  - 改动后：通过 **13** / 失败 **4**，**失败清单完全一致**
+  - 余 4 项均为预存问题：`proactive_prompt_ab` / `proactive_three_preview`（缺 DB 数据）、`agency_acceptance`（缺 `--suite`）、`initiative_integration_smoke`（生产测试期望 `const`、生产源码是 `let`）
+- **生产部署后**：两套测试全部通过
+- **真实数据判定（关键）**：对当时 9 条未完成动念跑规则
+  - 修复前：命中收尾 **3/9**，其中 **2 条误杀**
+  - 修复后：命中收尾 **1/9**，只收掉真正过期的订单表动念
+- 失败与分类：
+  1. **部署当天真实数据暴露误杀**（"沉默间隔"类关系短句被判过期）→ 补入 `沉默间隔|在意依然|依然惦记|依然在|不施加任何回复压力|不索取回复` 等关键词。
+  2. **修误杀时引入新误判**：`查询中影三天业绩` 落入兜底类，保质期由 48h 变 7 天。这是粒度取舍，选择放宽兜底（48h → 7 天）。
+  3. 测试自身多次写错期望值（兜底期改动后未同步、fixture 日期晚于基准、断言写反）—— 均为测试缺陷，已逐个改正并写明原因。
+
+### 生产
+
+- 是否部署：**是**（两次：先部署规则，再部署误杀修正）
+- 生产文件hash：
+  - `src/initiative.mjs` = `e59e1591e5ae…`（最终版）
+  - `src/db.mjs` = `c1a936936c20…`
+  - `src/proactive.mjs` = `6271bd698cbf…`
+  - `tests/agency/intention_lifetime.test.mjs` = `a7162f2a7f44…`
+  - `tests/agency/state_budget.test.mjs` = `f73ae8717bc4…`
+- 配置/策略变化：无
+- 备份：`/opt/xiyu-backups/intention-lifetime-20260917T184623Z/`、`...184736Z/`、清理前库 `/opt/xiyu-backups/stale-cleanup-20260917T183955Z/bot.db`
+- 重启与健康：MainPID 1549394 → 1709665 → 1710416；健康检查均通过；部署后积压动作 = 0
+- 回滚入口：
+  ```
+  sudo cp -p /opt/xiyu-backups/intention-lifetime-20260917T184736Z/{initiative,db,proactive}.mjs /opt/xiyu-ai/src/
+  sudo cp -p /opt/xiyu-backups/intention-lifetime-20260917T184736Z/state_budget.test.mjs /opt/xiyu-ai/tests/agency/
+  sudo rm -f /opt/xiyu-ai/tests/agency/intention_lifetime.test.mjs
+  sudo systemctl restart xiyu-ai
+  ```
+- 用户实际观察：**待观察**。积压已清零，机制效果需下一次主动 tick 与真实投递才能看到
+
+### 分状态结论
+
+- designed：四类保质期 + 三层收尾判定（含"每日仪式不过期"的防误杀设计）
+- implemented_local：`src/initiative.mjs`、`src/db.mjs`、`src/proactive.mjs` + 2 个测试 + 5 个运维脚本
+- verified_isolated：**是**（70/70 + 8/8；同条件对照零新增失败；真实数据 9 条动念逐条核对）
+- verified_real_api：否（未触发真实 provider 生成）
+- deployed：**是**
+- enabled：是（无开关，机制随代码生效）
+- observed_effective：**否，待观察**。判据：下一次主动 tick 后（a）订单表动念变为 `expired` 且动作被作废；（b）晚安不再因陈旧动作被 `agency_blocked`；（c）同一陈旧内容不再每小时重试
+
+### 后续交接
+
+- **本轮最重要的一条方法论结论**：
+  本项目在主动通道上**已卡过至少 5 次互不相同的静默故障**（预算耗尽 / 弧误判 / 复核撞车 / 窗口关闭 / 过期动作死循环）。共同特征是**失败不可见**：状态显示已发或什么都不说，用户只能自己发现"她不理我了"。
+  **因此后续不应只修症状，而应把"失败能不能被发现"当作验收标准之一。** 已知仍需补：
+  1. **不变量监控（尚未实现）**：`sent:true` 必须伴随真实投递；非终态动念长期无投递应告警；`preparing` 卡住超时应告警。
+  2. **第二、三层证据尚未接入**：`judgeIntentionRetirement` 的 `resolvedStreak` 与 `blockStreak` 在调用点仍硬编码为 0。**即"来源已消解自动完结"与"反复失败自动挂起"两层还没真正生效，只实现了第一层（保质期）。** 这是下一步明确工作。
+  3. `blockStreak` 需把预检失败记忆扩展成"按指纹计数"并接进收尾判定，替代纯时间冷却。
+- 仍需开发（按优先级）：
+  1. 接入第二/三层证据
+  2. 不变量监控与告警
+  3. 用户目视验收 9-15 部署的照片链路
+  4. 仓库与生产测试文件双向版本不一致（`photo_aspect_smoke.mjs` 本地旧；`initiative_integration_smoke.mjs` 生产旧）
+  5. 配文撞限速被丢弃（`outbound_caption_sent=0`）
+  6. 微信 24h 会话窗口（平台硬限制）
+- 待执行测试：下一次主动 tick 后核对订单表动念是否变 `expired`、其动作是否 `cancelled`、`proactive_precheck_last_failure` 是否不再堆积。
+- 真实外部阻塞：微信平台 24h 会话窗口。
+- 用户最小协助：发一条消息以重开窗口并验证投递链路。
+- 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 已推送 `b68f804`，本轮改动未提交
+
+---
+
+## 2026-09-18（续） — 回答"你怎么证明不会再卡"：不变量检查器 + 收尾闸解耦
+
+### 起因
+
+用户直接质疑上一轮结论：
+
+> "你怎么证明现在她的对话触发就不再有问题了？我们貌似已经卡了好多次了不同的问题··"
+
+这个问题不能靠"我改好了"回答。本项目主动通道已卡过 5 次互不相同的静默故障，
+其中 3 次是**用户自己发现的**。逐一修症状永远追不上，所以这一轮的目标改成
+**让下一个故障自己冒出来**，并且把上一轮"已部署但实际没生效"的部分补齐。
+
+### 调查与判断
+
+**1）上一轮部署的收尾闸其实没生效——被"窗口比池子小"挡住了**
+
+上一轮报告"已部署"，但生产上那条订单表动念 `agi_mu2igy2z_78b222d0c75665`
+依旧是 `ready`，9-17 全天撞车记录完整：
+
+| CST | kind | deliveryOutcome |
+| --- | --- | --- |
+| 12:17 | normal | failed `not_sent` |
+| 13:16 | normal | failed `not_sent` |
+| 15:57 | normal | **delivered** |
+| 18:08 | normal | failed `not_sent` |
+| 19:13 | normal | failed `not_sent` |
+| 20:44 | normal | failed `not_sent` |
+| 22:08 | goodnight | failed `not_sent`（被 `agency_blocked` 挤掉） |
+
+8 次尝试只送到 1 条（另 08:21 那格无记录）。18:08 / 19:13 / 20:44 三次的日志
+原因都是同一句 `订单表日报没有说清当前更新状态` → `重生后仍撞车，放弃本次主动`。
+
+根因：收尾闸的**入参**直接复用了候选列表，而候选列表是 `limit: 8`。
+池子涨到 **9** 条后，第 9 条（恰好就是这条）永远排在窗口外，
+**永远不被判定、永远不过期**。
+
+> 关键判断：把 `8` 改成 `10` 只是把窗口挪一格，池子再长一条就复发。
+> 这类"闸门看不见它该管的东西"的错会随数据量反复出现，
+> 所以必须让**扫描面与候选面彻底解耦**，而不是调大常量。
+
+**2）该检查器第一次跑时自己骗了自己**
+
+`check-proactive-invariants.mjs` 首次从错误目录启动。`db.mjs` 里
+`DB_PATH || path.resolve(process.cwd(), 'data/bot.db')` 是**相对 cwd** 解析的，
+于是它打开了一个**新建的空库**——没有任何表、零条记录，
+六条不变量**全部 PASS**。
+
+也就是说：检查器犯了它自己要抓的那类错（报"正常"而实际没查）。
+
+**3）I6 一开始把"正常等待"误判成"卡住"**
+
+原始判据把 `waiting_user` 也算作"未推进"。但 `waiting_user` 是**正常等用户回答**，
+`suspended` 是**主动暂停**，两者长期不动不等于卡住。已收窄为只查
+`preparing / ready / active`。
+
+### 实际改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/proactive.mjs` | ① `retireExpiredIntentions` 的扫描面改为独立查全量非终态动念（`limit: 50`），与候选面（`limit: 8`）解耦；② 新增 `sweepIntentionRetirement(owner)`；③ 在 `tick()` 里**每个 tick 都调用**，且特意放在**时间窗口判断之前**（清垃圾不该只在允许说话的时间段做），并保证**不受认知周期冷却影响**；④ owner 解析与 `runAgencyCycle` 完全同源（同一条微信绑定优先），否则会扫一个 account_id、认知用另一个，扫描等于白扫 |
+| `ops/xiyu-readonly-check/check-proactive-invariants.mjs` | ① 新增**自证闸**：未传绝对路径 `DB_PATH`、库不存在、缺预期表、`agency_intentions` 零条 → 一律 `exit 2`，**绝不输出"全部通过"**；② 输出改为同时报"总数/非终态数"并附库文件最后写入时间（原先两个口径的数字在同一份输出里对不上，像自相矛盾）；③ I6 排除 `waiting_user`/`suspended` |
+| `ops/xiyu-readonly-check/install-invariant-timer.sh` | 新增。装 `xiyu-invariants.service` + `.timer`，**每小时**跑一次，日志追加到 `/var/log/xiyu-invariants.log`，`SuccessExitStatus=0 1 2`（0 通过 / 1 有违反 / 2 无法确证连对库，退出码本身就是结论） |
+
+### 验证
+
+- 隔离验证（生产库只读副本 `/tmp/test-sweep.db`，不碰线上）：
+  `verify-sweep-rule.mjs` → 扫描前 9 条 → 命中收尾 **1** 条
+  （`agi_mu2igy2z_78b222d0c75665` → `expired`，理由
+  `shelf_life_time_bound_monitor:monitor_with_concrete_time`）→ 扫描后 8 条；
+  I3 残留过期动念 **0**；**每日仪式保留 6 条**（证明没有误杀）。
+- **隔离脚本自身也修了一个错**：早先写成"先查 `after` 再 UPDATE"，
+  等于拿旧数据复核，报出"每日仪式保留 0 条"的假警报。已改为 UPDATE 之后再查。
+- 本地：`node --check src/proactive.mjs` 通过；`intention_lifetime` 70/70。
+  （`state_budget.test.mjs` 本地跑不动是环境问题：`better-sqlite3` 原生模块
+  与本机 Node 版本不匹配，与改动无关。）
+- 生产部署后 `sweepIntentionRetirement` **自动生效**，日志为证：
+
+  ```
+  Sep 18 02:57:55 [Agency] 动念收尾 companion=1
+    id=agi_mu2igy2z_78b222d0c75665 → expired
+    （shelf_life_time_bound_monitor:monitor_with_concrete_time）
+    同时作废未完成动作 0 个
+  ```
+
+  注意这条**发生在认知周期之外**（上一轮认知是 00:01）——正是解耦要达成的效果。
+- 收尾后不变量复跑：**I1 I2 I3 I4 I5 全 PASS，只剩 I6 一条**。
+- 检查器退出码确认：有违反时 `exitcode=1`（定时告警依赖此语义）。
+
+### 生产
+
+- 备份：`/opt/xiyu-backups/sweep-decouple-20260917T185632Z`（首次）、
+  `/opt/xiyu-backups/sweep-decouple-20260917T185750Z`（tick 级扫描版）
+- `src/proactive.mjs` sha256 `2d1d25315256…`；`check-invariants.mjs` 已更新至 `/opt/xiyu-ai/`
+- 服务：`xiyu-ai.service` active；部署后健康 `{"ok":true}`
+- 定时器：`xiyu-invariants.timer` **active**，下一次 03:00 CST
+- 冲突弧仍关闭（`ARC_ENABLED=off`）；`XIYU_AGENCY_MODE=enabled`
+
+### 分状态结论
+
+- designed：不变量检查器（自证闸 + 六条不变量 + 退出码语义）+ 收尾闸解耦
+- implemented_local：`src/proactive.mjs`、`check-proactive-invariants.mjs`、`install-invariant-timer.sh`、`verify-sweep-rule.mjs`
+- verified_isolated：**是**（生产库副本上"收 1 保 6"；假警报已定位为脚本自身错误）
+- verified_real_api：否（未触发真实 provider 生成）
+- deployed：**是**
+- enabled：是（timer 已 `enable --now`）
+- observed_effective：**部分**
+  - I3（过期动念滞留）：**observed_effective** —— 生产上自动由 9 条降到 8 条，日志留痕
+  - I6（长期停滞的每日仪式）：**blocked（待设计）** —— 见下
+
+### 后续交接
+
+- **I6 是真实缺陷，不是检查器误报**：3 条 `active` 每日仪式动念（最久 218.7h）
+  早已投递过、且不会再推进，却因为"每日仪式永不过期"而永久驻留。
+  其中 `agi_mtsbnojz_029496dd1c567b` 身上挂着 **3 条 delivered 动作**（9 天前起），
+  说明它被反复选中投递了多次——正是用户担心的"同一件事换着法儿重来"。
+  修复方向（**未实施**）：已投递且超过 N 小时无新进展的每日仪式应完结；
+  或者给同一仪式类型加"新世代取代旧世代"的规则。
+  **不可直接套用保质期**——每日仪式必须能每天重发，误杀会停掉早安/晚安。
+- **第二、三层证据仍未接入**：`judgeIntentionRetirement` 的 `resolvedStreak` 与
+  `blockStreak` 在调用点仍硬编码 `0`。**"来源已消解自动完结"与"反复失败自动挂起"
+  两层依然没生效，只有第一层（保质期）在跑。**
+- `blockStreak` 需把预检失败记忆扩展为"按指纹计数"，替代纯时间冷却。
+- 定时检查目前只写日志，**尚未接外部告警**（无邮件/推送）。若要不依赖人看
+  `/var/log/xiyu-invariants.log`，还需要一层通知。
+- 用户本轮的原始问题"你怎么证明不会再卡"，**正确的回答不是"保证不再有 bug"**，
+  而是：已知失败模式已变成可自动检查的不变量，下一个同类故障会在 1 小时内
+  出现在日志里，而不是等用户在两天后发现"她不理我了"。
+- 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 已推送 `b68f804`，
+  本轮改动**未提交**

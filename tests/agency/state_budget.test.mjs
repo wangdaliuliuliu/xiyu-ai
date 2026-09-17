@@ -170,4 +170,42 @@ test('illegal nextState is clamped instead of losing the whole feedback', () => 
   assert.ok(list.some(f => f.kind === 'answer'), '反馈类型应正确保存');
 });
 
+// 2026-09-18 回归：动念收尾必须**同时作废它的未完成动作**。
+//
+// 生产事故：一条动念停在 ready，它派生的动作 9-15 13:10 就过期了，但动作
+// 过期不终结动念 → 动念每小时被重新选中、重新生成、撞在同一条出站复核上
+// （9-17 一天撞 3 次），还把当晚 22:08 的晚安拦掉（agency_blocked）。
+// 只收动念或只收动作都会留下这个缺口，所以这里锁住"两者一起"。
+test('retiring an intention cancels its unfinished actions in one transaction', () => {
+  const intention = makeIntention('retire-with-actions');
+  const ready = db.updateAgencyIntention(intention.id, { ...owner, expectedVersion: intention.version, state: 'ready' });
+  const planned = db.createAgencyAction({
+    ...owner, intentionId: intention.id, actionType: 'contact_text',
+    dedupKey: 'retire-action-planned', state: 'planned',
+  });
+  assert.ok(planned, '应能创建 planned 动作');
+
+  const result = db.retireAgencyIntention(intention.id, {
+    ...owner, state: 'expired', reason: 'test_shelf_life_expired',
+  });
+  assert.ok(result, '收尾应返回结果');
+  assert.equal(result.alreadyTerminal, false);
+  assert.equal(result.intention.state, 'expired', '动念应被收尾为 expired');
+  assert.ok(result.cancelledActions.includes(planned.id), '其未完成动作应被一并作废');
+
+  // 动作确实落到 cancelled，不再出现在"未完成"集合里
+  const stillOpen = db.listAgencyActions({ ...owner, intentionId: intention.id, states: ['planned', 'running', 'prepared', 'sending'] });
+  assert.equal(stillOpen.length, 0, '收尾后不该再有未完成动作（否则仍会卡住后续发送）');
+
+  // 幂等：再收一次不报错、也不重复计
+  const again = db.retireAgencyIntention(intention.id, { ...owner, state: 'expired', reason: 'again' });
+  assert.equal(again.alreadyTerminal, true, '已终态的动念再收一次应标记 alreadyTerminal');
+  assert.equal(again.cancelledActions.length, 0);
+
+  // 只接受合法的收尾状态，非法状态不得写库
+  const another = makeIntention('retire-invalid-state');
+  assert.equal(db.retireAgencyIntention(another.id, { ...owner, state: 'ready' }), null, 'ready 不是合法收尾状态，应拒绝');
+  assert.equal(db.getAgencyIntention(another.id, owner).state, 'candidate', '被拒绝后动念状态不得变化');
+});
+
 test.after(() => store.close());

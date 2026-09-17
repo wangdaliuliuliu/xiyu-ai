@@ -384,6 +384,63 @@ export function updateAgencyIntention(id, { accountId, companionId, expectedVers
   return changed.changes ? getAgencyIntention(id, owner) : null;
 }
 
+/**
+ * 收尾一条动念，并**在同一个事务里**作废它的未完成动作（2026-09-18 新增）。
+ *
+ * 为什么必须一起做：2026-09-15 的事故里，动念停在 ready，它派生的动作
+ * 9-15 13:10 就过期了 —— 但**动作过期不影响动念**，于是动念每小时被
+ * 重新选中、重新生成、撞在同一条出站复核上；9-17 一天撞 3 次，还把当晚
+ * 22:08 的晚安拦掉（agency_blocked）。只收动念或只收动作都会留下这个缺口。
+ *
+ * 与 updateAgencyIntention 的区别：
+ *   - 允许从任意非终态一步收尾（含 waiting_user → completed/expired），
+ *     因为"知识已经过期"不是一个普通状态转移，而是生命周期终止。
+ *   - 同时把该动念下 planned/running/prepared/sending 的动作置为 cancelled，
+ *     避免陈旧动作继续卡住后续发送。
+ *   - 返回 { intention, cancelledActions }，便于日志与回归断言。
+ *
+ * 不做的事：不碰 provider 配置、不重写已 delivered 的动作、不发消息。
+ */
+export function retireAgencyIntention(id, {
+  accountId, companionId, state = 'expired', reason = '', nowIso = new Date().toISOString(),
+} = {}) {
+  const owner = normalizeAgencyOwner(accountId, companionId);
+  if (!owner || !id || !['expired', 'completed', 'abandoned'].includes(state)) return null;
+  return getDb().transaction(() => {
+    const current = getAgencyIntention(id, owner);
+    if (!current) return null;
+    if (AGENCY_TERMINAL.has(current.state)) {
+      return { intention: current, cancelledActions: [], alreadyTerminal: true };
+    }
+    const note = String(reason || state).slice(0, 300);
+    const changed = getDb().prepare(
+      'UPDATE agency_intentions SET state = ?, next_review_condition = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ? AND companion_id = ?'
+    ).run(state, note, String(id), owner.accountId, owner.companionId);
+    if (!changed.changes) return null;
+    const openActions = getDb().prepare(
+      "SELECT id FROM agency_actions WHERE intention_id = ? AND account_id = ? AND companion_id = ? AND state IN ('planned','running','prepared','sending')"
+    ).all(String(id), owner.accountId, owner.companionId);
+    for (const row of openActions) {
+      // 直接用 SQL 而不是 updateAgencyAction：状态机的 ACTION_TRANSITIONS 不允许
+      // sending→cancelled，但"动念已被收尾"时这些动作一律不该再继续。
+      getDb().prepare("UPDATE agency_actions SET state = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ? AND companion_id = ?")
+        .run(row.id, owner.accountId, owner.companionId);
+    }
+    if (openActions.length) {
+      try {
+        recordAgencyConcernEvent({
+          ...owner,
+          intentionId: String(id),
+          eventKind: 'retired',
+          sourceRefs: [],
+          payload: { state, reason: note, cancelledActions: openActions.length },
+        });
+      } catch { /* 事件记录失败不影响收尾本身 */ }
+    }
+    return { intention: getAgencyIntention(id, owner), cancelledActions: openActions.map(r => r.id), alreadyTerminal: false };
+  }).immediate();
+}
+
 export function createAgencyAction({ id = null, intentionId, accountId, companionId, actionType = 'wait', strategySummary = '', inputRefs = [], expectedEffect = '', needsUserInput = false, completionCriteria = [], nextIfAnswered = '', nextIfUnanswered = '', notBefore = null, expiresAt = null, dedupKey = '', state = 'planned', providerMessageIds = [], resultRefs = [] } = {}) {
   const owner = normalizeAgencyOwner(accountId, companionId);
   if (!owner || !intentionId || !dedupKey || !['lookup', 'analyze', 'research', 'prepare_media', 'contact_text', 'contact_media', 'wait'].includes(actionType) || !AGENCY_ACTION_STATES.has(state)) return null;

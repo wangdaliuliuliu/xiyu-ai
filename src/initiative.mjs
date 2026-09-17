@@ -264,6 +264,193 @@ export function reactiveIntentPrompt(intent) {
   return `\n\n【本轮意图】目的：${intent.objective}；行动：${intent.action}；边界：${intent.boundary}。先完成用户当前这句话，再体现你一直是同一个专业、会撩且有分寸的人。不要说出这段内部意图。`;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 动念保质期（2026-09-18 新增）
+//
+// 事故背景：一条问「订单系统汇总表 2026-09-14 数据填了没」的动念，
+// 在 9-15 建立后一直停在 ready。它派生的动作 9-15 13:10 就过期了，
+// 但**动作过期不会终结动念**，于是：
+//   - 动念每小时被重新选中 → 重新生成 → 撞在同一条出站复核上 → 放弃
+//   - 9-17 一天撞 3 次（18:09 / 19:14 / 20:45），全是同一句
+//   - 9-17 22:08 的晚安被这批积压动作拦掉（agency_blocked）
+//   - 更根本的是：到 9-17 时「9-14 的表填了没」这个问题**本身已经没有意义**
+//
+// 设计要点：
+//   1. **先把具体日期与指标从文本里剔除**，再判断是否时效性。否则
+//      「用轻松早安承接新一天」会被当作时效性而误杀（它其实每天都该能发）。
+//   2. 区分四类，各有保质期；重复仪式与关系陪伴**不适用保质期**。
+//   3. 纯函数、零 IO、零模型，可离线确定性回归（tests/agency/intention_lifetime.test.mjs）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const INTENTION_LIFETIME = Object.freeze({
+  TIME_BOUND_MONITOR: 'time_bound_monitor',   // 监控类事实：订单表/日报/来源表状态
+  TIME_BOUND_FACT: 'time_bound_fact',         // 一次性时效事实：某天数据、某次查询
+  RECURRING_RITUAL: 'recurring_ritual',       // 每日节律：早安/晚安/低负担问候
+  NON_TIME_BOUND: 'non_time_bound',           // 方法/偏好/边界/定位：不随时间失效
+});
+
+export const INTENTION_SHELF_LIFE_HOURS = Object.freeze({
+  [INTENTION_LIFETIME.TIME_BOUND_MONITOR]: 24,
+  [INTENTION_LIFETIME.TIME_BOUND_FACT]: 48,
+  [INTENTION_LIFETIME.RECURRING_RITUAL]: null,   // null = 不适用
+  [INTENTION_LIFETIME.NON_TIME_BOUND]: 14 * 24,
+});
+
+// 兜底寿命：文本无法归类时使用。
+// 2026-09-18 真实数据回归后从 48h 放宽到 7 天 —— 兜底规则会误杀关系维护类
+// 短句（如"让用户感受到即使有沉默间隔，溪语的在意依然在"），宁可多留几天，
+// 也不能把一条正当动念在两天内收掉。
+const UNCLASSIFIED_SHELF_LIFE_HOURS = 7 * 24;
+
+// 具体时间锚点：出现即说明这条动念绑在某个已过去的时间点上。
+// 不加 \b —— 中文字符不是 word char，`2026-09-14 的晚安` 里日期后面紧跟空格、
+// 前面是中文时 \b 会失败，导致明明带日期却判不出来。
+const CONCRETE_DATE_RE = /20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\s*月\s*\d{1,2}\s*日|\d{1,2}[/-]\d{1,2}/;
+// 具体指标数：如 readySheets=0、510.7元、12单。**两条排除**：
+//   1) 英文 camelCase 键名（appraisal 里常见）不算"某天的数值"
+//   2) 中文数字量词不算 —— 否则「两三条标准」会被 "三" + 隐含量词误判
+//      （真实回归点：机会判断标准那条被误判成时效性）
+const CONCRETE_METRIC_RE = /(?<![A-Za-z])\d+(?:\.\d+)?\s*(?:元|单|票|人|%|％|万|千)(?![A-Za-z])/;
+// 监控类事实：来源表/日报/页签的状态
+const MONITOR_RE = /(订单表|汇总表|日报|周报|来源表|页签|监控表|检查表|sheet)/i;
+// 每日重复仪式 / 低负担关系开场（每天都要能发，不适用保质期）
+// 匹配宽松些：用关键词共现而不是精确距离，避免长句漏判。
+// 2026-09-18 真实数据回归补入：'沉默间隔'、'在意依然在'、'依然惦记' ——
+// 这类"关系维护"短句曾在生产上被漏判成 unclassified 而误收。
+const RITUAL_RE = /(早安|晚安|早上好|晚上好|睡前|morning|goodnight|今天一直惦记|晚安收尾|承接新一天|新一天开始|留一个|低负担|随时可以|沉默间隔|在意依然|依然惦记|依然在|不施加任何回复压力|不索取回复)/;
+// 沿用既有硬编码常量，避免重复定义
+const TIMELESS_RE = /(标准|原则|偏好|习惯|边界|底线|为什么|怎么判断|如何看待|核心服务对象|核心选择理由|明确不做|取舍|岗位|职责|口径|交给谁|拍板)/;
+
+/** 剔除具体日期与带单位的数值后，剩下的文本才算"稳定意图"。 */
+function stripConcreteEvidence(text) {
+  return text
+    .replace(/20\d{2}-\d{1,2}-\d{1,2}/g, ' ')
+    .replace(/\d{1,2}\s*月\s*\d{1,2}\s*日/g, ' ')
+    .replace(/\d{1,2}[/-]\d{1,2}/g, ' ')
+    .replace(/(?<![A-Za-z])\d+(?:\.\d+)?\s*(?:元|单|票|人|%|％|万|千)(?![A-Za-z])/g, ' ');
+}
+
+function intentionText(intention = {}) {
+  return [
+    intention.desired_change,
+    intention.desiredChange,
+    intention.appraisal_summary,
+    intention.appraisalSummary,
+  ].filter(Boolean).join(' ');
+}
+
+/**
+ * 判定一条动念的知识寿命类型。
+ * @returns {{ type: string, shelfLifeHours: number|null, reason: string }}
+ */
+export function classifyIntentionLifetime(intention = {}) {
+  const src = intention || {};
+  const full = intentionText(src);
+  // 无文本时**不能**当作"不过期"——那会让一条空动念无限期被重试。
+  // 按一次性事实给 48h 有界寿命（保守快收）。
+  // 注意：`= {}` 只对 undefined 生效，显式传 null 时形参就是 null，
+  // 所以上面再兜一层 src，否则 intentionText(null) 会抛（已由测试锁住）。
+  if (!full) {
+    return {
+      type: INTENTION_LIFETIME.TIME_BOUND_FACT,
+      shelfLifeHours: INTENTION_SHELF_LIFE_HOURS[INTENTION_LIFETIME.TIME_BOUND_FACT],
+      reason: 'empty_text_bounded_default',
+    };
+  }
+
+  const hasConcreteDate = CONCRETE_DATE_RE.test(full);
+  const hasConcreteMetric = CONCRETE_METRIC_RE.test(full);
+  const stable = stripConcreteEvidence(full);          // 剔除具体锚点后的"稳定意图"
+  const bound = hasConcreteDate || hasConcreteMetric;  // 是否绑在具体时间点/数值上
+  const isMonitor = MONITOR_RE.test(full);
+
+  // ① 监控类 + 绑具体时间 → 最短保质期
+  if (isMonitor && bound) {
+    return { type: INTENTION_LIFETIME.TIME_BOUND_MONITOR, shelfLifeHours: INTENTION_SHELF_LIFE_HOURS[INTENTION_LIFETIME.TIME_BOUND_MONITOR], reason: 'monitor_with_concrete_time' };
+  }
+  // ② 绑具体时间 → 一次性时效事实
+  if (bound) {
+    return { type: INTENTION_LIFETIME.TIME_BOUND_FACT, shelfLifeHours: INTENTION_SHELF_LIFE_HOURS[INTENTION_LIFETIME.TIME_BOUND_FACT], reason: hasConcreteDate ? 'concrete_date' : 'concrete_metric' };
+  }
+  // ③ 未绑具体时间 + 每日仪式 → 不适用保质期（早安/晚安每天都要能发）
+  if (RITUAL_RE.test(stable)) {
+    return { type: INTENTION_LIFETIME.RECURRING_RITUAL, shelfLifeHours: null, reason: 'recurring_ritual' };
+  }
+  // ④ 未绑具体时间 + 方法论/偏好/边界 → 长保质期
+  if (TIMELESS_RE.test(stable)) {
+    return { type: INTENTION_LIFETIME.NON_TIME_BOUND, shelfLifeHours: INTENTION_SHELF_LIFE_HOURS[INTENTION_LIFETIME.NON_TIME_BOUND], reason: 'methodology_or_boundary' };
+  }
+  // ⑤ 兜底：没绑具体时间的普通意图给 7 天有界寿命（保守，不无限期重试，
+  //    也不像 48h 那样容易误杀关系维护类短句）
+  return { type: INTENTION_LIFETIME.TIME_BOUND_FACT, shelfLifeHours: UNCLASSIFIED_SHELF_LIFE_HOURS, reason: 'unclassified_default_fact' };
+}
+
+/** 从动念的建立时间 + 保质期算出到期时刻；不适用保质期返回 null。 */
+export function intentionShelfDeadline(intention = {}, { createdAtMs = null } = {}) {
+  const src = intention || {};
+  const { shelfLifeHours } = classifyIntentionLifetime(src);
+  if (!shelfLifeHours) return null;
+  const raw = String(src.created_at || src.createdAt || '');
+  const base = Number.isFinite(createdAtMs)
+    ? createdAtMs
+    : Date.parse(raw.replace(' ', 'T') + (raw.includes('Z') ? '' : 'Z'));
+  if (!Number.isFinite(base)) return null;
+  return base + shelfLifeHours * 3600e3;
+}
+
+/** 该动念是否已超过知识寿命。不适用保质期的类型永远返回 false。 */
+export function isIntentionExpired(intention = {}, { nowMs = Date.now(), createdAtMs = null } = {}) {
+  const deadline = intentionShelfDeadline(intention, { createdAtMs });
+  return deadline != null && nowMs > deadline;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 收尾判定：三层合成（2026-09-18）
+//
+// 一层（保质期）解决"问的东西过期了"，二层解决"问题已经不需要问了"，
+// 三层解决"这条内容反复过不了自己的质量门"。
+// 三种死法必须分开记，因为后续行为不同：
+//   expired   —— 时效过了，不再回头
+//   completed —— 问题自己消解了，不再回头（但要知道是"已解决"不是"过期"）
+//   suspended —— 内容过不了质量门；条件变化后仍可能重来
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 同一指纹连续失败的次数阈值：达到即判定"这条内容投不出去"。 */
+export const INTENTION_BLOCK_SUSPEND_AT = 3;
+
+/**
+ * 判定一条动念是否应当收尾。
+ *
+ * @param {object} intention 动念（含 desired_change / created_at 等）
+ * @param {object} opts
+ *   nowMs          当前时间
+ *   createdAtMs    覆盖建立时间（测试用）
+ *   resolvedStreak 该动念的"来源已消解"连续确认次数（由调用方重查来源后累计）
+ *   blockStreak    同一指纹连续被出站门拦下的次数
+ * @returns {{ retire: false|'expired'|'completed'|'suspended', reason: string }}
+ */
+export function judgeIntentionRetirement(intention = {}, {
+  nowMs = Date.now(),
+  createdAtMs = null,
+  resolvedStreak = 0,
+  blockStreak = 0,
+} = {}) {
+  // 第一层：知识寿命
+  if (isIntentionExpired(intention, { nowMs, createdAtMs })) {
+    const { type, reason } = classifyIntentionLifetime(intention || {});
+    return { retire: 'expired', reason: `shelf_life_${type}:${reason}` };
+  }
+  // 第二层：来源已消解（要求**连续两次**确认，避免一次查询失败就误杀正当跟进）
+  if (Number(resolvedStreak) >= 2) {
+    return { retire: 'completed', reason: 'source_condition_resolved_twice' };
+  }
+  // 第三层：同内容反复过不了出站门
+  if (Number(blockStreak) >= INTENTION_BLOCK_SUSPEND_AT) {
+    return { retire: 'suspended', reason: `blocked_${Number(blockStreak)}x_same_fingerprint` };
+  }
+  return { retire: false, reason: 'still_valid' };
+}
+
 export function appendInitiativeReceipt(receipt, file = process.env.XIYU_INITIATIVE_LEDGER_PATH || path.resolve(process.cwd(), 'data/initiative-ledger.jsonl')) {
   const safe = { at: new Date().toISOString(), schemaVersion: 'initiative-receipt-v1', intentionId: compact(receipt?.decision?.id), primaryDrive: compact(receipt?.decision?.primaryDrive), domain: compact(receipt?.decision?.domain), action: compact(receipt?.decision?.action), objective: compact(receipt?.decision?.objective).slice(0, 300), whyNow: compact(receipt?.decision?.whyNow).slice(0, 300), status: compact(receipt?.status || 'unknown'), textSegments: Number(receipt?.textSegments || 0), imageSegments: Number(receipt?.imageSegments || 0), reason: compact(receipt?.reason).slice(0, 300) };
   fs.mkdirSync(path.dirname(file), { recursive: true });
