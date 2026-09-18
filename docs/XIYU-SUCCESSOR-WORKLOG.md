@@ -1116,8 +1116,8 @@
 - 用户本轮的原始问题"你怎么证明不会再卡"，**正确的回答不是"保证不再有 bug"**，
   而是：已知失败模式已变成可自动检查的不变量，下一个同类故障会在 1 小时内
   出现在日志里，而不是等用户在两天后发现"她不理我了"。
-- 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 已推送 `b68f804`，
-  本轮改动**未提交**
+- 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 本条目随 `da1b7c0` 推送
+  （原写"未提交"，是撰写时的状态；后续已提交，此处更正以免误导接手人）
 
 ---
 
@@ -1275,8 +1275,7 @@ if (activeAgencyMode === AGENCY_MODE.ENABLED && agencyCycle.status !== 'contact_
 6. 配文撞限速被丢弃（`outbound_caption_sent=0`）。
 7. 微信 24h 会话窗口（平台硬限制，不可修）。
 - 用户最小协助：**发一条消息**既能重开 24h 窗口，也能顺便验证投递链路。
-- 结束分支/HEAD：`codex/ideal-lab-completion-20260908`，
-  本轮改动**未提交**
+- 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 本条目随 `8bc121f` 推送
 
 ---
 
@@ -1395,4 +1394,4 @@ return `- ${roleLabel[t.role]}${topic}：${content}`;   // 没有时间
   6. 仓库与生产测试文件双向版本不一致。
   7. 配文撞限速被丢弃（`outbound_caption_sent=0`）。
   8. 微信 24h 会话窗口（平台硬限制）。
-- 结束分支/HEAD：`codex/ideal-lab-completion-20260908`，本轮改动**未提交**
+- 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 本条目随 `4370247` 推送
