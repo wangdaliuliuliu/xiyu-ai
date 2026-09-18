@@ -405,13 +405,15 @@ export function isIntentionExpired(intention = {}, { nowMs = Date.now(), created
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 收尾判定：三层合成（2026-09-18）
+// 收尾判定：四层合成（2026-09-18）
 //
 // 一层（保质期）解决"问的东西过期了"，二层解决"问题已经不需要问了"，
-// 三层解决"这条内容反复过不了自己的质量门"。
-// 三种死法必须分开记，因为后续行为不同：
+// 三层解决"这条内容反复过不了自己的质量门"，
+// 四层解决"每日仪式已经送出去了、却还赖在池子里等着被再送一次"。
+//
+// 四种死法必须分开记，因为后续行为不同：
 //   expired   —— 时效过了，不再回头
-//   completed —— 问题自己消解了，不再回头（但要知道是"已解决"不是"过期"）
+//   completed —— 事情已经办完（来源消解 / 仪式已送出），不再回头
 //   suspended —— 内容过不了质量门；条件变化后仍可能重来
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -419,14 +421,29 @@ export function isIntentionExpired(intention = {}, { nowMs = Date.now(), created
 export const INTENTION_BLOCK_SUSPEND_AT = 3;
 
 /**
+ * 每日仪式投递后，隔多久判定"这一次已经送完了"。
+ *
+ * 实测事故（2026-09-08 ~ 09-09）：同一条仪式动念 `agi_mtsbnojz_029496dd1c567b`
+ * 身上挂着 3 条 delivered 动作，时间分别是 09-08 15:02 / 19:09 / 09-09 00:17
+ * ——**同一条内容在一天内被送出去 3 次**。原因是投递完成后动念永远停在
+ * `active`，而下一次生成会通过 `findAgencyIntentionBySemanticKey` **复用它**。
+ *
+ * 取 6 小时是因为那 3 次投递两两相隔 2~5 小时：窗口太短会拦不住当天复用，
+ * 太长则会让"今天已经送过"的动念一直占着候选位。6 小时能覆盖实测间隔，
+ * 又不会跨到第二天。
+ */
+export const RITUAL_SETTLED_HOURS = 6;
+
+/**
  * 判定一条动念是否应当收尾。
  *
  * @param {object} intention 动念（含 desired_change / created_at 等）
  * @param {object} opts
- *   nowMs          当前时间
- *   createdAtMs    覆盖建立时间（测试用）
- *   resolvedStreak 该动念的"来源已消解"连续确认次数（由调用方重查来源后累计）
- *   blockStreak    同一指纹连续被出站门拦下的次数
+ *   nowMs                 当前时间
+ *   createdAtMs           覆盖建立时间（测试用）
+ *   resolvedStreak        该动念的"来源已消解"连续确认次数（由调用方重查来源后累计）
+ *   blockStreak           同一指纹连续被出站门拦下的次数
+ *   latestDeliveredAtMs   该动念最近一次**真实送达**的毫秒时间戳（无则 null）
  * @returns {{ retire: false|'expired'|'completed'|'suspended', reason: string }}
  */
 export function judgeIntentionRetirement(intention = {}, {
@@ -434,6 +451,7 @@ export function judgeIntentionRetirement(intention = {}, {
   createdAtMs = null,
   resolvedStreak = 0,
   blockStreak = 0,
+  latestDeliveredAtMs = null,
 } = {}) {
   // 第一层：知识寿命
   if (isIntentionExpired(intention, { nowMs, createdAtMs })) {
@@ -447,6 +465,22 @@ export function judgeIntentionRetirement(intention = {}, {
   // 第三层：同内容反复过不了出站门
   if (Number(blockStreak) >= INTENTION_BLOCK_SUSPEND_AT) {
     return { retire: 'suspended', reason: `blocked_${Number(blockStreak)}x_same_fingerprint` };
+  }
+  // 第四层：每日仪式已经送出去了 → 完结
+  //
+  // 只对 recurring_ritual 生效（早安/晚安/低负担入口）。这类内容本身
+  // 不该过期，但**一次投递就是一次完成**：旧动念完结后，同内容再来时
+  // `findAgencyIntentionBySemanticKey` 查不到它（已终态），于是建一条新的，
+  // 所以"明天还能发早安"不受影响，只是不会拿已经发过的那条再发一遍。
+  const deliveredAt = Number(latestDeliveredAtMs);
+  if (Number.isFinite(deliveredAt) && deliveredAt > 0) {
+    const { type } = classifyIntentionLifetime(intention || {});
+    if (type === INTENTION_LIFETIME.RECURRING_RITUAL) {
+      const settledMs = RITUAL_SETTLED_HOURS * 3600e3;
+      if (nowMs - deliveredAt >= settledMs) {
+        return { retire: 'completed', reason: 'ritual_delivered_and_settled' };
+      }
+    }
   }
   return { retire: false, reason: 'still_valid' };
 }

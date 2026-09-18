@@ -23,6 +23,7 @@ import {
   judgeIntentionRetirement,
   INTENTION_LIFETIME,
   INTENTION_BLOCK_SUSPEND_AT,
+  RITUAL_SETTLED_HOURS,
 } from '../../src/initiative.mjs';
 
 let pass = 0, fail = 0;
@@ -231,6 +232,61 @@ for (const c of CASES) {
     try { judgeIntentionRetirement(bad, { nowMs: BASE, createdAtMs: NaN }); } catch { threw = true; }
     ok(!threw, `收尾判定畸形输入不抛错：${JSON.stringify(bad)}`);
   }
+}
+
+// ═══ 7. 第四层：每日仪式"已送出即完结" ═══════════════════════════════════
+//
+// 真实事故（2026-09-08 ~ 09-09）：同一条仪式动念 agi_mtsbnojz_029496dd1c567b
+// 身上挂着 3 条 delivered 动作，时间 09-08 15:02 / 19:09 / 09-09 00:17
+// —— 同一条内容在一天内被送出去 3 次。
+// 成因：投递完成后动念永远停在 active，下一次生成会复用同语义键的那条。
+// 这一层让"送出去一次"就是"完成一次"，同时**不能**碰还没送过的仪式
+// （否则会把当天要发的早安提前收掉）。
+{
+  const ritual = { desired_change: '在睡前用一句轻软的晚安收尾，让用户感到溪语今天一直惦记着他', created_at: '2026-09-08 16:00:00' };
+  const H2 = H;
+
+  // 已送出且已静置 → completed
+  const d1 = judgeIntentionRetirement(ritual, {
+    nowMs: BASE, createdAtMs: BASE - 10 * 24 * H2, latestDeliveredAtMs: BASE - (RITUAL_SETTLED_HOURS + 1) * H2,
+  });
+  ok(d1.retire === 'completed', `仪式送出并静置 ${RITUAL_SETTLED_HOURS}h 后 → completed（实际 ${d1.retire} / ${d1.reason}）`);
+  ok(d1.reason === 'ritual_delivered_and_settled', `第四层原因可辨识（实际 ${d1.reason}）`);
+
+  // 边界：刚好卡在阈值上 → 收（用 >=）
+  const d2 = judgeIntentionRetirement(ritual, {
+    nowMs: BASE, createdAtMs: BASE - 10 * 24 * H2, latestDeliveredAtMs: BASE - RITUAL_SETTLED_HOURS * H2,
+  });
+  ok(d2.retire === 'completed', `刚好 ${RITUAL_SETTLED_HOURS}h → 收（闭区间）`);
+
+  // 刚送出不久 → 保留。这条防的是"投递完立刻收掉、当天想再补一句时已经没有动念"
+  const d3 = judgeIntentionRetirement(ritual, {
+    nowMs: BASE, createdAtMs: BASE - 10 * 24 * H2, latestDeliveredAtMs: BASE - (RITUAL_SETTLED_HOURS - 1) * H2,
+  });
+  ok(d3.retire === false, `送出不足 ${RITUAL_SETTLED_HOURS}h → 保留（实际 ${d3.retire} / ${d3.reason}）`);
+
+  // 从未送出（无投递时间）→ 保留，且**不因**第四层被收
+  for (const noEvidence of [null, undefined, 0, NaN, 'x']) {
+    const r = judgeIntentionRetirement(ritual, {
+      nowMs: BASE, createdAtMs: BASE - 10 * 24 * H2, latestDeliveredAtMs: noEvidence,
+    });
+    ok(r.retire === false, `无投递证据（${JSON.stringify(noEvidence)}）不因第四层收尾（实际 ${r.retire}）`);
+  }
+
+  // 第四层只对每日仪式生效：一次性事实动念"送出去过"不等于"事情办完了"
+  // （例如"确认订单表填了没"送出后还要等用户回答，不能自动完结）
+  const fact = { desired_change: '拿到用户判断新机会的两三条标准，把东坝企业定位变成可筛选规则', created_at: '2026-09-10 16:00:00' };
+  const d4 = judgeIntentionRetirement(fact, {
+    nowMs: BASE, createdAtMs: BASE - 5 * 24 * H2, latestDeliveredAtMs: BASE - (RITUAL_SETTLED_HOURS + 40) * H2,
+  });
+  ok(d4.retire === false, `非仪式动念不因第四层收尾（实际 ${d4.retire} / ${d4.reason}）`);
+
+  // 优先级：保质期仍然最优先（过期比"已送出"更确定）
+  const staleMonitor = { desired_change: '确认订单系统汇总表 2026-09-14 数据是否还在路上', created_at: '2026-09-15 10:10:36' };
+  const d5 = judgeIntentionRetirement(staleMonitor, {
+    nowMs: BASE, createdAtMs: BASE - 30 * H2, latestDeliveredAtMs: BASE - 1 * H2,
+  });
+  ok(d5.retire === 'expired', `保质期优先于第四层（实际 ${d5.retire}）`);
 }
 
 console.log(`intention_lifetime: 通过 ${pass} 失败 ${fail}`);

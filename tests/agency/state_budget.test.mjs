@@ -23,6 +23,73 @@ test('owner-scoped lease fences concurrent cognition', () => {
   assert.ok(second.fencing > first.fencing);
 });
 
+test('cognition cooldown reports WHICH gate blocked it', () => {
+  // 2026-09-18 生产：日志只有 `status=cooldown`，看不出是三道否决里的哪一道，
+  // 排查时只能猜。这里锁住"每道否决都必须给出可辨识原因"。
+  //
+  // 时间线设计（踩过三次坑后写清楚）：
+  //   ① 租约只有 90 秒有效期，而本测试要跨越分钟级时间点。直接用几步之外的
+  //      时间戳去调，会先撞 lease_invalid，走不到要验的那道闸。
+  //   ② `acquireAgencyLease` 的守卫是 `lease_until <= now`。它比较的是库里存的
+  //      **绝对**到期时间（上一次 acquire 时的 now + 90s），而不是"我们刚把
+  //      时钟拨过去了"。所以时间旅行前必须**显式释放**上一份租约（把
+  //      lease_until 置 0），否则第二次 acquire 直接返回 null。
+  //   ③ 每次 acquire 都会把 last_cognition_at 写回该次的 now，步与步之间留
+  //      31 分钟，既保证硬间隔越过，又不至于让上一步的语义被覆盖。
+  const cooldownOwner = { accountId: 7002, companionId };
+  const t0 = 5_000_000;
+  const t1 = t0 + 60_000;          // 1 分钟后：仍受 30 分钟硬间隔约束
+  const t2 = t0 + 31 * 60_000;     // 31 分钟后：硬间隔已过
+  const t4 = t2 + 31 * 60_000;     // 再 31 分钟：用于验证来源变化
+
+  let prevLease = null;
+  const leaseAt = (nowMs, tag) => {
+    if (prevLease) {
+      db.releaseAgencyLease({ ...cooldownOwner, token: prevLease.lease_token, fencing: Number(prevLease.fencing) });
+      prevLease = null;
+    }
+    const lease = db.acquireAgencyLease({ ...cooldownOwner, now: nowMs, token: `cog-${tag}` });
+    assert.ok(lease, `应在 t=${nowMs} 取得租约`);
+    prevLease = lease;
+    return lease;
+  };
+  const call = (nowMs, lease, over = {}) => db.beginAgencyCognition({
+    ...cooldownOwner, token: lease.lease_token, fencing: Number(lease.fencing), now: nowMs, ...over,
+  });
+
+  // 租约无效（不存在的 token）
+  assert.equal(
+    db.beginAgencyCognition({ ...cooldownOwner, token: 'bogus', fencing: 1, now: t0 }).reason,
+    'lease_invalid'
+  );
+
+  // 首次可以开始 → 写回 last_cognition_at = t0
+  const l0 = leaseAt(t0, 'first');
+  assert.deepEqual(call(t0, l0, { sourceVersion: 'v1' }), { started: true, reason: 'started' });
+
+  // 同来源、1 分钟后 → 撞 30 分钟硬间隔，原因要说明还剩多少分钟
+  const l1 = leaseAt(t1, 'gap');
+  const gap = call(t1, l1, { sourceVersion: 'v1' });
+  assert.equal(gap.started, false);
+  assert.match(gap.reason, /^cognition_gap_\d+min_left$/, `实际原因 ${gap.reason}`);
+
+  // 同来源、31 分钟后（硬间隔已过），但 reconsiderAfter 未到 → 原因带出该时刻
+  const l2 = leaseAt(t2, 'recons');
+  const recons = call(t2, l2, {
+    sourceVersion: 'v1',
+    reconsiderAfter: new Date(t2 + 30 * 60_000).toISOString(),
+  });
+  assert.equal(recons.started, false);
+  assert.match(recons.reason, /^reconsider_after_/, `实际原因 ${recons.reason}`);
+
+  // 来源变了 → 可以提前触发（新事实不该被陪伴节流吞掉）
+  const l4 = leaseAt(t4, 'changed');
+  const changed = call(t4, l4, { sourceVersion: 'v2' });
+  assert.equal(changed.started, true, `来源版本变化应能提前触发认知（实际 ${changed.reason}）`);
+
+  if (prevLease) db.releaseAgencyLease({ ...cooldownOwner, token: prevLease.lease_token, fencing: Number(prevLease.fencing) });
+});
+
 test('budget reserves attempts before provider work and stops at the daily cap', () => {
   // 2026-09-14：日上限由硬编码 8/24000 改为可配置的 16/96000。
   // 生产实测单次 appraise 就要 5242~10209 token，旧上限一天只够想一次。

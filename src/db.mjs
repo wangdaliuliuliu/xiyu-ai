@@ -651,17 +651,32 @@ export function settleAgencyBudget({ id, accountId, companionId, usage = null } 
 
 /** Commit exactly one cognition opportunity; plan/retry calls have their own reservations. */
 export function beginAgencyCognition({ accountId, companionId, token, fencing, sourceVersion = '', now = Date.now(), reconsiderAfter = null } = {}) {
-  if (!agencyLeaseValid({ accountId, companionId, token, fencing, now })) return false;
+  // 返回 { started, reason } 而不是裸 boolean（2026-09-18）。
+  //
+  // 起因：生产上出现 `[Agency] cycle status=cooldown`，但三道否决
+  // （租约无效 / 30 分钟硬间隔 / reconsider_after）**都只返回 false**，
+  // 日志里完全看不出是哪一道挡的。排查时只能猜——而"失败不可见"正是
+  // 本项目主动通道反复栽的同一个坑（见工作日志 2026-09-18）。
+  //
+  // 现在每道否决都带一句可读原因，调用方把它原样打进日志。
+  if (!agencyLeaseValid({ accountId, companionId, token, fencing, now })) {
+    return { started: false, reason: 'lease_invalid' };
+  }
   return getDb().transaction(() => {
     const row = getDb().prepare('SELECT * FROM agency_runtime WHERE account_id=? AND companion_id=?').get(accountId, companionId);
-    if (!row) return false;
+    if (!row) return { started: false, reason: 'runtime_row_missing' };
     // 新来源版本代表有增量事实，可以提前触发一次认知；同一来源仍受
     // 30 分钟硬间隔与 reconsider_after 约束。这样“业务数据刚更新”不会
     // 被普通陪伴节流吞掉，但无变化的自由反思仍然低频。
     const sourceChanged = String(row.source_version || '') !== String(sourceVersion || '');
-    if (!sourceChanged && now - row.last_cognition_at < 30 * 60_000) return false;
-    if (!sourceChanged && reconsiderAfter && Date.parse(reconsiderAfter) > now) return false;
-    return Boolean(getDb().prepare('UPDATE agency_runtime SET last_cognition_at=?, source_version=? WHERE account_id=? AND companion_id=? AND lease_token=? AND fencing=? AND lease_until>?').run(now, sourceVersion, accountId, companionId, token, fencing, now).changes);
+    if (!sourceChanged && now - row.last_cognition_at < 30 * 60_000) {
+      return { started: false, reason: `cognition_gap_${Math.ceil((30 * 60_000 - (now - row.last_cognition_at)) / 60_000)}min_left` };
+    }
+    if (!sourceChanged && reconsiderAfter && Date.parse(reconsiderAfter) > now) {
+      return { started: false, reason: `reconsider_after_${new Date(Date.parse(reconsiderAfter)).toISOString()}` };
+    }
+    const ok = Boolean(getDb().prepare('UPDATE agency_runtime SET last_cognition_at=?, source_version=? WHERE account_id=? AND companion_id=? AND lease_token=? AND fencing=? AND lease_until>?').run(now, sourceVersion, accountId, companionId, token, fencing, now).changes);
+    return ok ? { started: true, reason: 'started' } : { started: false, reason: 'runtime_update_no_rows' };
   }).immediate();
 }
 

@@ -173,7 +173,7 @@ function clearChannelClosedStreak() {
  * 全部 fail-open：判定或写库失败都不阻塞本轮，宁可多留一条也不误杀。
  * 返回 { kept, retired }，便于日志与回归断言。
  */
-function retireExpiredIntentions(owner, intentions) {
+function retireExpiredIntentions(owner, intentions, { deliveredByIntention = new Map() } = {}) {
   const list = Array.isArray(intentions) ? intentions.filter(Boolean) : [];
   if (!list.length) return { kept: [], retired: [] };
   const kept = [];
@@ -186,6 +186,8 @@ function retireExpiredIntentions(owner, intentions) {
         // 这里先只启用确定性最强的第一层，避免在无证据时误收。
         resolvedStreak: 0,
         blockStreak: 0,
+        // 第四层（仪式已送出）：由调用方传入的投递证据驱动。
+        latestDeliveredAtMs: deliveredByIntention.get(String(intention.id)) ?? null,
       });
     } catch (e) {
       log('warn', `[Agency] 动念收尾判定异常（按保留处理）companion=${owner.companionId} id=${intention.id}: ${e.message}`);
@@ -238,7 +240,29 @@ function sweepIntentionRetirement(owner) {
       // 不能跟着候选列表的条数走（那正是 2026-09-17 那次漏扫的成因）。
       limit: 50,
     });
-    const { retired } = retireExpiredIntentions(owner, all);
+    if (!all.length) return [];
+
+    // 第四层（仪式已送出）需要知道"这条动念最近一次真实送达是什么时候"。
+    // 一次查全量 delivered 动作再按 intentionId 归并，避免逐条动念各查一次。
+    // 时间取 `updated_at`：动作一旦 delivered 就不会再被 updateAgencyAction 改动
+    // （它把 delivered 视为终态直接拒绝），所以 updated_at 就是送达时刻。
+    let deliveredByIntention = new Map();
+    try {
+      const delivered = listAgencyActions({ ...owner, states: ['delivered'], limit: 100 });
+      for (const a of delivered) {
+        const at = Date.parse(String(a.updated_at || a.created_at || '').replace(' ', 'T') + (String(a.updated_at || '').includes('Z') ? '' : 'Z'));
+        if (!Number.isFinite(at)) continue;
+        const key = String(a.intentionId || '');
+        if (!key) continue;
+        if (!deliveredByIntention.has(key) || deliveredByIntention.get(key) < at) deliveredByIntention.set(key, at);
+      }
+    } catch (e) {
+      // 取不到投递证据时退化为"只跑前三层"，不误判、不阻塞。
+      log('warn', `[Agency] 仪式投递证据读取失败（本轮只跑前三层）companion=${owner?.companionId}: ${e.message}`);
+      deliveredByIntention = new Map();
+    }
+
+    const { retired } = retireExpiredIntentions(owner, all, { deliveredByIntention });
     return retired;
   } catch (e) {
     log('warn', `[Agency] 动念收尾扫描异常（不影响本轮）companion=${owner?.companionId}: ${e.message}`);
@@ -579,7 +603,11 @@ export async function runAgencyCycle({
       now: now.getTime(),
       reconsiderAfter: currentIntentions[0]?.reconsiderAfter || null,
     });
-    if (!cognitionStarted) return { status: 'cooldown', mode: currentMode, calls: 0, error: 'agency_cognition_not_due' };
+    if (!cognitionStarted?.started) {
+      // 2026-09-18：原来只返回 false，日志里看不出是三道否决里的哪一道，
+      // 排查时只能猜。现在把原因原样带出来。
+      return { status: 'cooldown', mode: currentMode, calls: 0, error: 'agency_cognition_not_due', reason: cognitionStarted?.reason || 'unknown' };
+    }
   }
   const appraisalBudget = reserveAgencyBudget({ ...owner, purpose: 'appraise', inputTokens: 10000, outputTokens: 800, attempts: 2, now: now.getTime() });
   if (!appraisalBudget) return { status: 'blocked', mode: currentMode, calls: 0, error: 'agency_budget_exhausted' };
@@ -1711,7 +1739,7 @@ ${recallLoop.expected_followup ? `你心里想：${recallLoop.expected_followup}
           constraints: { kind: effectiveKind, noOutboundDuringValidation: false },
         },
       });
-      log('info', `[Agency] cycle companion=${companion.id} mode=${activeAgencyMode} status=${agencyCycle.status} calls=${agencyCycle.calls}`);
+      log('info', `[Agency] cycle companion=${companion.id} mode=${activeAgencyMode} status=${agencyCycle.status} calls=${agencyCycle.calls}${agencyCycle.reason ? ` reason=${agencyCycle.reason}` : ''}`);
     } catch (error) {
       log('warn', `[Agency] cycle 异常 companion=${companion.id}: ${error.message}`);
       agencyCycle = { status: 'inconclusive', mode: activeAgencyMode, error: String(error.message || error) };

@@ -1118,3 +1118,162 @@
   出现在日志里，而不是等用户在两天后发现"她不理我了"。
 - 结束分支/HEAD：`codex/ideal-lab-completion-20260908` / 已推送 `b68f804`，
   本轮改动**未提交**
+
+---
+
+## 2026-09-18（续二） — 清掉 3 条卡了 9 天的每日仪式；发现"冷却即静默"这个大坑
+
+用户回复「做吧」，授权处理上一条工作日志里标记为 `blocked（待设计）` 的 I6。
+
+### 调查与判断
+
+**1）I6 不是检查器误报，是"同一件事被反复投递"的实锤**
+
+先取证：6 条每日仪式动念，逐个看它们的动作历史。
+
+| 动念 | 状态 | delivered 动作 | 关键发现 |
+| --- | --- | --- | --- |
+| `agi_mtsbnojz_029496dd1c567b` | active | **3 条** | 09-08 15:02 / 19:09 / 09-09 00:17 |
+| `agi_mttawzk3_13bc38c34772b4` | suspended | 1 条 | 09-09 08:29 |
+| `agi_mtucbi0l_a338a5c6fe72d3` | active | 1 条 | 09-09 01:56 |
+| `agi_mturok87_406151e5ecb246` | suspended | 1 条 | 09-10 09:06 |
+| `agi_mtz28i5t_cb48d55ce4c8c2` | suspended | 1 条 | 09-13 11:12 |
+| `agi_mu002vba_30b3a3938947cc` | suspended | 0 条（4 条 cancelled） | 从未送出 |
+
+`agi_mtsbnojz` 那 3 次投递**落在同一天内、两两相隔 2~5 小时**——这就是
+"同一条内容换着法儿重来"的直接证据，也是用户原本抱怨的东西。
+
+成因链已查明：
+1. 投递完成后动念**永远停在 `active`**，没有任何东西把它完结；
+2. 下一次生成走 `findAgencyIntentionBySemanticKey`，而它只查"非终态"
+   （`state NOT IN ('completed','abandoned','expired')`），
+   于是**复用了已经发过的那条**；
+3. 重复投递。
+
+**2）为什么不能直接套用"保质期"**
+
+每日仪式（早安/晚安/低负担入口）必须每天都能发。给它加保质期会让
+早安晚安**发不出去**——比不修更糟。这是上一条日志把它标成"待设计"的原因。
+
+**3）解法：第四层 —— 仪式"已真实送达且已静置"即完结**
+
+- 静置窗口 `RITUAL_SETTLED_HOURS = 6`：实测那 3 次投递两两相隔 2~5 小时，
+  6 小时能覆盖实测间隔，又不会跨到第二天。
+- 完结后同内容再来时，`findAgencyIntentionBySemanticKey` **查不到它**
+  （已终态），于是建一条**新的**。所以"明天还能发早安"不受影响，
+  只是不会拿已经发过的那条再发一遍。
+
+### 实际改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/initiative.mjs` | 新增 `RITUAL_SETTLED_HOURS = 6`；`judgeIntentionRetirement` 新增第四层：`latestDeliveredAtMs` 存在、类型为 `recurring_ritual`、且静置 ≥ 6h → `completed`（理由 `ritual_delivered_and_settled`） |
+| `src/proactive.mjs` | `sweepIntentionRetirement` 一次查全量 `delivered` 动作并按 `intentionId` 归并最大 `updated_at`，传给判定；`retireExpiredIntentions` 新增 `deliveredByIntention` 参数 |
+| `src/db.mjs` | `beginAgencyCognition` 返回值由 `boolean` 改为 `{started, reason}`，三道否决各自带原因（`lease_invalid` / `cognition_gap_Nmin_left` / `reconsider_after_<ISO>` / `runtime_row_missing` / `runtime_update_no_rows`） |
+| `src/proactive.mjs` | cycle 日志带出 `reason=...` |
+| `tests/agency/intention_lifetime.test.mjs` | +11 条（70 → 81），锁住第四层的边界、无证据不误收、非仪式不适用、保质期优先级 |
+| `tests/agency/state_budget.test.mjs` | +1 条，锁住三道否决各自的原因（9 条全过） |
+
+**契约确认**：`retireAgencyIntention` 用直连 SQL 是有意为之，注释里写明
+"知识已经过期不是普通状态转移，而是生命周期终止"，允许从任意非终态一步收尾。
+所以 `suspended → completed` 在其契约内，不是绕过校验。
+但记一个语义坑：`suspended → completed` 之后**只看 `state` 分不清**
+"事情办完了"和"被中断了"，只能靠 `next_review_condition` 区分。
+
+### 验证
+
+- 离线：`intention_lifetime` **81/81**；`state_budget` **9/9**。
+- 隔离验证（生产库副本 + 独立 staging 目录 + **待部署**的 `initiative.mjs`）：
+  - 6 条仪式中命中收尾 **5** 条（都是"已投递过"的）
+  - 剩余 1 条 = `agi_mu002vba`（**从未送出**，只有 cancelled 动作）→ 正确保留
+  - **正在等用户回答的 `agi_mu58m3qj` 仍在池中** ✅（最关键的安全断言）
+  - 残留"已投递过"的仪式：**0** ✅；残留过期动念：**0** ✅
+- 生产实测（部署后自动跑）：日志确认
+  `agi_mtucbi0l_a338a5c6fe72d3 → completed（ritual_delivered_and_settled）`、
+  `agi_mtsbnojz_029496dd1c567b → completed（ritual_delivered_and_settled）`
+  （另 3 条 suspended 的收尾日期不在当日窗口，非终态动念 8 → 6 条，
+  I6 违规由 3 条降到 1 条）。
+
+**本轮我自己犯的错（记录以免重犯）**：
+- `verify-sweep-rule.mjs` 先查 `after` 再 UPDATE → 拿旧数据复核，报出
+  "每日仪式保留 0 条"的**假警报**。
+- `state_budget` 新测试连错两次：① 租约只有 90 秒有效却用 10/31 分钟后的
+  时间戳调用，先撞 `lease_invalid`；② `acquireAgencyLease` 的守卫比较的是
+  库里存的**绝对**到期时间，时间旅行前必须**显式释放**上一份租约。
+  两处都已把原因写进测试注释。
+
+### 生产
+
+- 备份：`/opt/xiyu-backups/ritual-settle-20260918T014640Z`、
+  `/opt/xiyu-backups/cooldown-reason-20260918T015036Z`
+- `src/initiative.mjs` `87c5c4245842…`、`src/proactive.mjs` `d6d1ca54babc…`、
+  `src/db.mjs` `87f01c124a5f…`
+- 测试文件已补齐到生产（上一轮部署脚本只备份未替换，导致部署校验跑出 70 条；
+  本轮修正并确认生产为 81 条）
+- 服务 active；不变量 I1~I5 全 PASS，I6 从 3 条降到 1 条
+
+### 分状态结论
+
+- designed：第四层（仪式已送达即完结）+ 认知冷却自报原因
+- implemented_local：`src/initiative.mjs`、`src/proactive.mjs`、`src/db.mjs`、2 个测试、3 个部署脚本
+- verified_isolated：**是**（副本上"收 5 保 1"，等用户回答那条未被误杀）
+- verified_real_api：否
+- deployed：**是**（两个改动均已上线）
+- enabled：是
+- observed_effective：**部分**
+  - I6 的仪式堆积：**部分生效** —— 生产已自动收 2 条、总数 8→6；
+    剩 1 条 `preparing` 属下一节的另一个问题
+  - 冷却原因可见性：**尚未观察到** —— 部署后还没出现新的 `cooldown`，
+    需要等下一次出现才能确认日志带出原因
+
+### 后续交接
+
+**本轮发现一个更大的问题，尚未修：**
+
+`proactive.mjs:1743` 写着
+
+```js
+if (activeAgencyMode === AGENCY_MODE.ENABLED && agencyCycle.status !== 'contact_ready') {
+  recordInitiative('blocked', { reason: `agency_${agencyCycle.status || 'not_ready'}` });
+  return false;   // ← 直接取消整次主动发送
+}
+```
+
+也就是说在 `XIYU_AGENCY_MODE=enabled` 下，**认知周期的任何非 `contact_ready`
+结果都会硬拦整条主动发送**，其中包括 `cooldown`。
+
+而 `cooldown` 来自 `beginAgencyCognition` 的三道否决，其中
+`reconsiderAfter` 取的是 `currentIntentions[0]?.reconsiderAfter`
+——**某一条动念的话题级冷却，能否决掉当天的早安**。
+
+生产证据：2026-09-18 08:45:56
+
+```
+[Agency] cycle companion=1 mode=enabled status=cooldown calls=0
+[Proactive] 未送达 companion=1 kind=morning reason=not_sent
+```
+
+（08:20:58 还有一次 `status=inconclusive`。）当天 08:45 的早安因此没发出去。
+
+**但具体是哪一道闸，当时无法确定**——这正是本轮先加
+`{started, reason}` 的原因。部署后尚未再次出现 `cooldown`，所以
+**还没有实证**，不能凭推测去改。
+
+设计上的问题很清楚，与"话题冷却可否决每日仪式"有关：
+早安/晚安属于每日仪式，与"某个话题现在不适合再提"是两件不同的事，
+后者不该拦住前者。修之前需要先拿到 `reason` 实证，否则会改错地方。
+
+**其余未完成（沿用上一轮）：**
+1. `judgeIntentionRetirement` 第二/三层（`resolvedStreak` / `blockStreak`）
+   在调用点仍硬编码 `0`，"来源已消解"与"反复失败挂起"两层仍未生效。
+2. 剩余 1 条 I6：`agi_mu002xm2_bf1742cc920ccc`（`preparing` 已 80.4h，
+   内容"查询中影门店最近三天的销售业绩"，**没有任何动作**）。
+   它是"工具链没回执"的典型——`preparing` 卡住没有超时兜底。
+3. 定时不变量检查只写日志，尚未接外部告警。
+4. 用户目视验收 9-15 部署的照片链路。
+5. 仓库与生产测试文件双向版本不一致。
+6. 配文撞限速被丢弃（`outbound_caption_sent=0`）。
+7. 微信 24h 会话窗口（平台硬限制，不可修）。
+- 用户最小协助：**发一条消息**既能重开 24h 窗口，也能顺便验证投递链路。
+- 结束分支/HEAD：`codex/ideal-lab-completion-20260908`，
+  本轮改动**未提交**
