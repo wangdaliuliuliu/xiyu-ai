@@ -550,14 +550,30 @@ ${recentScheduleUsage}`);
   // ── 15. 最近对话上下文 ─────────────────────────────────────────────────────
   // v1.2.10: 12 → 16 轮，配合 bot.mjs 取数上限同步上调，让连续对话感更强。
   // 每行已被 slice(0,240) 截短，整段开销可控（约 +1KB）。
+  //
+  // 2026-09-18 追加「多久以前」标注。真实事故：用户在 9-18 上午 10:06 问
+  // "你在做什么"，她回"刚跟你发完照片不就躺回去了嘛，灯还关着一半呢"，
+  // 并回头追一个 9-17 的问题——**因为这份上下文里每一条都没有时间**，
+  // 三天前的对话和一分钟前的对话长得一模一样，她无从判断"刚"到底指什么时候。
+  // 时间戳本来就在 recentTurns 里（getConversationContext 返回 created_at），
+  // 只是在拼提示词时被丢掉了。
   const contextTurns = recentTurns.slice(-16).filter(t => t?.content);
   if (contextTurns.length > 0) {
     const roleLabel = { user: '他', assistant: '你', system: '系统' };
+    const turnsNow = Date.now();
     const lines = contextTurns.map(t => {
       const topic = t.topic ? `（${t.topic}）` : '';
-      return `- ${roleLabel[t.role] || t.role}${topic}：${String(t.content).slice(0, 240)}`;
+      const ago = relativeTimeLabel(t.created_at, turnsNow);
+      return `- ${roleLabel[t.role] || t.role}${ago ? `[${ago}]` : ''}${topic}：${String(t.content).slice(0, 240)}`;
     });
-    parts.push(`\n【最近对话上下文】\n${lines.join('\n')}\n延续上面的最近聊天内容，保持称呼、情绪和话题连贯；不要机械复述上下文。`);
+    parts.push(`\n【最近对话上下文】\n${lines.join('\n')}
+延续上面的最近聊天内容，保持称呼、情绪和话题连贯；不要机械复述上下文。
+★ 每行开头的方括号是**那次对话距离现在多久**，必须认真对待：
+  - 标着「刚刚」「N 分钟前」的，才是"刚发生的事"，可以用"刚""刚才"去接。
+  - 标着「N 小时前」「N 天前」的，**已经过去很久了**。绝不能对着几天前的内容说
+    "刚""刚才""刚刚才"——那会让对方觉得你把时间搞混了。
+  - 如果一件事发生在几小时/几天前，而你现在想问对方、或想接着聊，就把它当
+    "前几天那事"来提（"前几天说的那个…""前两天你不是说…"），不要当成刚发生。`);
   }
 
   // ── 16. 额外人设 ─────────────────────────────────────────────────────────────
@@ -639,33 +655,22 @@ ${_langRule}
 他：我喜欢吃辣
 她：「真的」||「我超能吃」||「下次一起」`);
 
+  // ── 此刻的时间事实（2026-09-18：两种模式都要）────────────────────────────
+  // 原来这整段只在 promptMode === 'proactive' 里构造，于是**被动回复**时她手上
+  // 只有【此刻】那一行钟表信息，**没有任何"这个点你不该在做那件事"的硬约束**。
+  //
+  // 真实事故：9-18 上午 10:06 用户问"你在做什么"，她答"刚跟你发完照片就躺回去了，
+  // 灯还关着一半"——而当天日程里 08:00 就该去上早课、10:00 在课间对海报。
+  // 主动模式本来有"不能在错误时段说刚放学/刚下班/刚到家"这类约束，被动回复没有，
+  // 所以同一件事主动说得出、被动就穿帮。
+  //
+  // 现在抽成函数，两种模式共用约束，只有那句"你这次是主动找他"不同。
+  const timeReality = buildTimeRealityConstraint(c);
+  if (timeReality) parts.push(timeReality);
+
   if (promptMode === 'proactive') {
-    const tNowMin = nowShanghaiMinute();
-    const hh = Math.floor(tNowMin / 60);
-    const isWknd = (() => {
-      const wd = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', weekday: 'short' }).format(new Date());
-      return wd === 'Sat' || wd === 'Sun';
-    })();
-    const age = Number(c.age || 22);
-    let timeReality = `现在是上海时间 ${String(hh).padStart(2, '0')}:${String(tNowMin % 60).padStart(2, '0')}，${isWknd ? '周末' : '工作日'}。`;
-    if (!isWknd) {
-      if (age >= 16 && age <= 18) {
-        if (hh >= 8 && hh < 12) timeReality += '你现在应该在学校上课/课间，不可能"放学""下班""刚到家"。';
-        else if (hh >= 12 && hh < 14) timeReality += '你正在学校午休/吃午饭，不在家。';
-        else if (hh >= 14 && hh < 17) timeReality += '你在学校上下午的课，禁止"放学回家"。';
-        else if (hh >= 17 && hh < 18) timeReality += '差不多刚放学/在回家路上。';
-      } else if (age >= 19 && age <= 22) {
-        if (hh >= 8 && hh < 12) timeReality += '上午通常在上课/自习/睡懒觉，不会"下班"。';
-        else if (hh >= 12 && hh < 14) timeReality += '午饭时间，在食堂或宿舍。';
-      } else if (age >= 23) {
-        if (hh >= 9 && hh < 12) timeReality += '工作时间，不可能"放学"。';
-        else if (hh >= 12 && hh < 14) timeReality += '午饭时间。';
-        else if (hh >= 14 && hh < 18) timeReality += '上班中，禁止"下班/到家"。';
-      }
-    }
     parts.push(`
 【主动消息模式】
-${timeReality}
 - 这次是你主动找他聊天，不要说"我刚看到""你刚才说"这种被动用词
 - 自然地起话题：可以延续最近聊过的事、关心他正在忙的事、分享你自己的小事
 - 一条消息只发一个事/一个话题，别像群发；不超过 2-3 句
@@ -755,6 +760,73 @@ function pickMoodSegment(nowMin, segments) {
   if (nowMin < 12 * 60) return segments.morning || null;
   if (nowMin < 18 * 60) return segments.afternoon || null;
   return segments.evening || null;
+}
+
+/**
+ * 把某个时刻写成"距离现在多久"的中文标签，注入【最近对话上下文】。
+ *
+ * 为什么需要（2026-09-18 真实事故）：上下文里原来只有内容没有时间，
+ * 三天前和一分钟前的对话在她眼里没有区别，于是她对着 9-14 晚上的照片对话
+ * 说"刚跟你发完照片"，还回头追 9-17 的问题。时间戳一直在数据里，只是没注入。
+ *
+ * 容错：SQLite 的 `CURRENT_TIMESTAMP` 是 `YYYY-MM-DD HH:MM:SS`（UTC，无 Z），
+ * 而代码里写入的多数是 ISO 带 Z。两种都要认，认不出就返回空串（不注入），
+ * 宁可不标注也不乱标——标错时间比不标更糟。
+ */
+function relativeTimeLabel(raw, nowMs = Date.now()) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  const ms = Date.parse(s.includes('T') || s.endsWith('Z') ? s : `${s.replace(' ', 'T')}Z`);
+  if (!Number.isFinite(ms)) return '';
+  const min = (nowMs - ms) / 60_000;
+  if (min < 0) return '刚刚';
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${Math.floor(min)} 分钟前`;
+  const h = min / 60;
+  if (h < 24) return `${Math.floor(h)} 小时前`;
+  const d = h / 24;
+  if (d < 7) return `${Math.floor(d)} 天前`;
+  if (d < 30) return `${Math.floor(d / 7)} 周前`;
+  return `${Math.floor(d / 30)} 个月前`;
+}
+
+/**
+ * 「此刻的时间事实」约束块——两种模式共用（2026-09-18 从 proactive 分支里抽出来）。
+ *
+ * 抽出来的原因见调用点注释：被动回复原来完全没有这层约束，导致"上午十点说
+ * 自己刚躺下、灯关着一半"这种与日程直接冲突的回复。主动模式早就有这套约束，
+ * 业务上没有任何理由只给主动模式。
+ *
+ * 保持纯函数、零依赖：只读 companion 的 age，其余全从当前时间推导。
+ */
+function buildTimeRealityConstraint(c = {}) {
+  const tNowMin = nowShanghaiMinute();
+  const hh = Math.floor(tNowMin / 60);
+  const isWknd = (() => {
+    const wd = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', weekday: 'short' }).format(new Date());
+    return wd === 'Sat' || wd === 'Sun';
+  })();
+  const age = Number(c.age || 22);
+  let s = `【此刻的时间事实】现在是上海时间 ${String(hh).padStart(2, '0')}:${String(tNowMin % 60).padStart(2, '0')}，${isWknd ? '周末' : '工作日'}。`;
+  if (!isWknd) {
+    if (age >= 16 && age <= 18) {
+      if (hh >= 8 && hh < 12) s += '你现在应该在学校上课/课间，不可能"放学""下班""刚到家"。';
+      else if (hh >= 12 && hh < 14) s += '你正在学校午休/吃午饭，不在家。';
+      else if (hh >= 14 && hh < 17) s += '你在学校上下午的课，禁止"放学回家"。';
+      else if (hh >= 17 && hh < 18) s += '差不多刚放学/在回家路上。';
+    } else if (age >= 19 && age <= 22) {
+      if (hh >= 8 && hh < 12) s += '上午通常在上课/自习/睡懒觉，不会"下班"；**这个点不说自己"躺在床上""灯关了""要睡了"**。';
+      else if (hh >= 12 && hh < 14) s += '午饭时间，在食堂或宿舍。';
+    } else if (age >= 23) {
+      if (hh >= 9 && hh < 12) s += '工作时间，不可能"放学"。';
+      else if (hh >= 12 && hh < 14) s += '午饭时间。';
+      else if (hh >= 14 && hh < 18) s += '上班中，禁止"下班/到家"。';
+    }
+  }
+  s += ' ★ 白天不要说自己刚睡下、刚躺回床上、灯关了、准备睡了——那是深夜的事。'
+    + '你的说法必须和【你今天的安排】里这个时段的安排一致；对方问"你在做什么"，'
+    + '就照日程里此刻正在做的那件事自然回答，不要凭空编一个和日程冲突的场景。';
+  return s;
 }
 
 function buildTimeAwarenessBlock(now = new Date()) {
